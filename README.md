@@ -6,16 +6,16 @@ Pure forex trading bot implementing Smart Money Concepts (SMC) methodology with 
 
 ```bash
 # 1. Set up MT5 account credentials
-# See: MT5_SETUP.md
+# See: docs/MT5_SETUP.md
 
 # 2. Install dependencies
 pip install -r requirements.txt
 
 # 3. Test connection
-python3 test_mt5_connection.py
+python3 tests/test_mt5_connection.py
 
 # 4. Run live bot (paper trading)
-python3 live_trading_bot.py
+python3 scripts/live_trading_bot.py
 ```
 
 ## Architecture
@@ -46,8 +46,17 @@ machine_learning/
       ├── trade_predictor.py    # LightGBM outcome prediction
       └── lstm_price_predictor.py # LSTM price forecasting
 
-live_trading_bot.py            # Main live trading bot
-trading_bot.py                 # Demo/testing orchestrator
+scripts/
+  ├── live_trading_bot.py       # Main live trading bot
+  └── trading_bot.py            # Demo/testing orchestrator
+
+tests/
+  └── test_mt5_connection.py    # MT5 setup validation
+
+docs/
+  ├── DOCKER_SETUP.md           # Docker development guide
+  ├── DOCKER_README.md          # Quick Docker start
+  └── MT5_SETUP.md              # MT5 configuration guide
 ```
 
 ## Core Strategy: Smart Money Concepts (SMC)
@@ -117,7 +126,7 @@ MT5_SERVER=your_server_name
 EOF
 
 # 2. Run bot
-python3 live_trading_bot.py
+python3 scripts/live_trading_bot.py
 ```
 
 ### Backtesting
@@ -137,11 +146,11 @@ python3 backtest_runner.py --symbols EURUSD GBPUSD --days 100
 ### Testing
 
 ```bash
-# Test Oanda API connection
-python3 test_mt5_connection.py
+# Test MT5 API connection
+python3 tests/test_mt5_connection.py
 
 # Test strategy on live prices (demo)
-python3 trading_bot.py
+python3 scripts/trading_bot.py
 ```
 
 ## Database
@@ -179,13 +188,14 @@ See `config/config.json` for default settings:
 
 ## Files
 
-| File                     | Purpose                             |
-| ------------------------ | ----------------------------------- |
-| `MT5_SETUP.md`           | Step-by-step MT5 account setup      |
-| `live_trading_bot.py`    | Main live trading entry point       |
-| `test_mt5_connection.py` | Validate MT5 setup before trading   |
-| `backtests/README.md`    | Backtesting documentation           |
-| `data/`                  | Trade journals and backtest results |
+| File                             | Purpose                             |
+| -------------------------------- | ----------------------------------- |
+| `docs/MT5_SETUP.md`              | Step-by-step MT5 account setup      |
+| `scripts/live_trading_bot.py`    | Main live trading entry point       |
+| `tests/test_mt5_connection.py`   | Validate MT5 setup before trading   |
+| `docs/DOCKER_SETUP.md`           | Docker development environment      |
+| `backtests/README.md`            | Backtesting documentation           |
+| `data/`                          | Trade journals and backtest results |
 
 ## Requirements
 
@@ -198,9 +208,9 @@ See `config/config.json` for default settings:
 ## Next Steps
 
 1. ✓ Create MT5 account with credentials (already have)
-2. ✓ Set up environment variables (MT5_SETUP.md)
-3. ✓ Run `test_mt5_connection.py` (validate)
-4. ✓ Start `live_trading_bot.py` (paper trading)
+2. ✓ Set up environment variables (see docs/MT5_SETUP.md)
+3. ✓ Run `tests/test_mt5_connection.py` (validate)
+4. ✓ Start `scripts/live_trading_bot.py` (paper trading)
 5. ✓ Monitor in MT5 terminal
 6. ✓ Review trade journal daily
 7. Once profitable: Switch to live (change credentials)

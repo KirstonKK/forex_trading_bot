@@ -34,21 +34,25 @@ That's it! No Python installation, no dependencies, nothing. Docker handles ever
 ## Common Commands
 
 ### Run Quick Backtest (200 days, 2 minutes)
+
 ```bash
 docker-compose up --build
 ```
 
 ### Run Realistic Backtest (2 weeks, 5 minutes)
+
 ```bash
 docker-compose run forex_bot python3 backtests/scripts/backtest_realistic_live.py
 ```
 
 ### Run All Backtests
+
 ```bash
 docker-compose run forex_bot python3 backtests/scripts/backtest_runner.py
 ```
 
 ### Interactive Shell (Debug Mode)
+
 ```bash
 docker-compose run forex_bot bash
 # Now you're inside the container
@@ -56,6 +60,7 @@ python3 -c "from core.smc_strategy import SMCStrategy; print('SMC loaded!')"
 ```
 
 ### Check Trade Results
+
 ```bash
 # View trades from latest backtest
 sqlite3 data/live_journal.db "SELECT * FROM trades ORDER BY entry_time DESC LIMIT 10;"
@@ -65,6 +70,7 @@ docker-compose exec forex_bot sqlite3 data/live_journal.db "SELECT symbol, direc
 ```
 
 ### View Real-Time Logs
+
 ```bash
 docker-compose logs -f
 ```
@@ -109,12 +115,14 @@ docker-compose logs -f
 ### For Single Dev Modifications:
 
 1. **Edit code** (e.g., change SMC parameters)
+
    ```bash
    # Edit core/smc_strategy.py locally
    vim core/smc_strategy.py
    ```
 
 2. **Rebuild and test**
+
    ```bash
    docker-compose up --build
    ```
@@ -127,6 +135,7 @@ docker-compose logs -f
 ### For Team Collaboration:
 
 1. **Share via Git**
+
    ```bash
    git add .
    git commit -m "Updated SMC signal strength filter"
@@ -134,6 +143,7 @@ docker-compose logs -f
    ```
 
 2. **Team member pulls and runs**
+
    ```bash
    git pull
    docker-compose up --build
@@ -146,33 +156,37 @@ docker-compose logs -f
 
 ## Performance Benchmarks
 
-| Test | Duration | Trades Generated | Docker Time |
-|------|----------|------------------|-------------|
-| Quick (200 days) | 2 min | 50-100 | 2 min |
-| Realistic (2 weeks) | 1.5 hours simulated | 10-50 | 5 min |
-| Full (1 year) | 6 hours simulated | 100-300 | 15 min |
+| Test                | Duration            | Trades Generated | Docker Time |
+| ------------------- | ------------------- | ---------------- | ----------- |
+| Quick (200 days)    | 2 min               | 50-100           | 2 min       |
+| Realistic (2 weeks) | 1.5 hours simulated | 10-50            | 5 min       |
+| Full (1 year)       | 6 hours simulated   | 100-300          | 15 min      |
 
 ## Troubleshooting
 
 ### "Cannot find image"
+
 ```bash
 docker-compose down -v  # Clean up
 docker-compose up --build  # Rebuild
 ```
 
 ### "Permission denied /app/data"
+
 ```bash
 chmod -R 755 data/
 docker-compose up --build
 ```
 
 ### "Out of disk space"
+
 ```bash
 docker system prune -a  # Clean unused images
 docker-compose up --build
 ```
 
 ### "Python module not found"
+
 ```bash
 # Rebuild to ensure dependencies are fresh
 docker-compose down -v
@@ -182,6 +196,7 @@ docker-compose up --build
 ## Testing Different Strategies
 
 ### Test SMC with stricter signal filters:
+
 ```bash
 # Edit core/smc_strategy.py (change signal_strength_threshold = 0.75)
 vim core/smc_strategy.py
@@ -191,6 +206,7 @@ docker-compose up --build
 ```
 
 ### Test different timeframes:
+
 ```bash
 # Edit backtests/scripts/run_quick_backtest.py
 vim backtests/scripts/run_quick_backtest.py
@@ -253,6 +269,7 @@ See `MT5_SETUP.md` for live trading setup.
 ## Tips for Teams
 
 ### Share Strategy Improvements
+
 ```bash
 # Save your backtest results
 cp data/live_journal.db data/backtest_results_$(date +%Y%m%d).db
@@ -264,6 +281,7 @@ git push
 ```
 
 ### Compare Strategies
+
 ```bash
 # Team member downloads and runs
 git pull
@@ -284,4 +302,3 @@ sqlite3 data/live_journal.db "SELECT COUNT(*) as total_trades, SUM(CASE WHEN sta
 ---
 
 **Happy backtesting!** 📊🚀
-

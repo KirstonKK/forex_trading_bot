@@ -7,6 +7,7 @@ docker-compose up --build
 ```
 
 That's it! Docker will:
+
 1. ✅ Install Python 3.9
 2. ✅ Install all dependencies (TensorFlow, pandas, LightGBM, etc.)
 3. ✅ Set up SQLite database
@@ -14,6 +15,7 @@ That's it! Docker will:
 5. ✅ Show results in your terminal
 
 **Requirements:**
+
 - Docker Desktop (free, [download here](https://www.docker.com/products/docker-desktop))
 - ~500MB disk space
 - ~3 minutes first run
@@ -41,10 +43,10 @@ docker-compose down
 
 - **Strategy**: Smart Money Concepts (SMC)
   - BOS (Break of Structure) detection
-  - Pullback zone identification  
+  - Pullback zone identification
   - Entry zones: FVG, Discount zones, Order blocks
-  
 - **Risk Management**:
+
   - 1% risk per trade
   - 1.5% daily loss limit
   - 3% weekly loss limit

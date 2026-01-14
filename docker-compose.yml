@@ -16,5 +16,5 @@ services:
     # Keep container running
     restart: unless-stopped
     # Run the backtest by default
-    # Override with: docker-compose run forex_bot python3 live_trading_bot.py
+    # Override with: docker-compose run forex_bot python3 scripts/live_trading_bot.py
     command: python3 backtests/scripts/run_quick_backtest.py
