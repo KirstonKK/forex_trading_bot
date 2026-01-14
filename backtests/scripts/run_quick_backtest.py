@@ -46,7 +46,7 @@ def main():
         print(f"    {symbol}: {len(candles)} candles")
     
     # Run backtest
-    print("\\nRunning backtest...")
+    print("\nRunning backtest...")
     engine = BacktestEngine(
         account_balance=account_balance,
         risk_per_trade=risk_per_trade,
@@ -62,19 +62,19 @@ def main():
     print("RESULTS")
     print("="*70)
     
-    print("\\nTrade Summary:")
+    print("\nTrade Summary:")
     print(f"  Total Trades: {stats['total_trades']}")
     print(f"  Winning: {stats['winning_trades']} ({stats['win_rate']:.1f}%)")
     print(f"  Losing: {stats['losing_trades']}")
     
     if stats['total_trades'] > 0:
-        print("\\nP&L Summary:")
+        print("\nP&L Summary:")
         print(f"  Total P&L: ${stats['total_pnl']:,.2f}")
         print(f"  Initial Balance: ${account_balance:,.2f}")
         print(f"  Final Balance: ${stats['final_balance']:,.2f}")
         print(f"  Return: {((stats['final_balance'] - account_balance) / account_balance * 100):.2f}%")
         
-        print(\"\\nTrade Metrics:\")
+        print("\nTrade Metrics:")
         print(f"  Avg Win: ${stats['avg_win']:,.2f}")
         print(f"  Avg Loss: ${stats['avg_loss']:,.2f}")
         print(f"  Profit Factor: {stats['profit_factor']:.2f}")
