@@ -1,0 +1,16 @@
+{
+  "account_balance": 10000.0,
+  "risk_percent": 1.0,
+  "symbols": [
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY"
+  ],
+  "timeframe": "H1",
+  "lookback_periods": 50,
+  "min_rr_ratio": 1.5,
+  "broker": "mt5",
+  "demo_mode": true,
+  "mt5_login": 0,
+  "mt5_server": "ICMarketsSC-Demo"
+}

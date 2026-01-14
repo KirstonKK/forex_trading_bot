@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  forex_bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: forex_trading_bot
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Mount local data directory to persist trade journals and results
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backtests/results:/app/backtests/results
+    # Keep container running
+    restart: unless-stopped
+    # Run the backtest by default
+    # Override with: docker-compose run forex_bot python3 live_trading_bot.py
+    command: python3 backtests/scripts/run_quick_backtest.py
