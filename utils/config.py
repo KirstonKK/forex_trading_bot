@@ -26,7 +26,7 @@ class Config:
 
     def __init__(self, config_path: str = "config/config.json"):
         self.config_path = Path(config_path)
-        self.config = self.DEFAULTS.copy()
+        self._config = self.DEFAULTS.copy()
         self.load()
 
     def load(self):
@@ -35,7 +35,7 @@ class Config:
             try:
                 with open(self.config_path, 'r') as f:
                     file_config = json.load(f)
-                    self.config.update(file_config)
+                    self._config.update(file_config)
             except Exception as e:
                 print(f"Error loading config: {e}")
 
@@ -44,7 +44,7 @@ class Config:
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_path, 'w') as f:
-                json.dump(self.config, f, indent=2)
+                json.dump(self._config, f, indent=2)
         except Exception as e:
             print(f"Error saving config: {e}")
 
@@ -56,12 +56,12 @@ class Config:
         if env_key in os.environ:
             return os.environ[env_key]
         
-        return self.config.get(key, default)
+        return self._config.get(key, default)
 
     def set(self, key: str, value: Any):
         """Set configuration value."""
-        self.config[key] = value
+        self._config[key] = value
 
     def to_dict(self) -> Dict:
         """Get config as dictionary."""
-        return self.config.copy()
+        return self._config.copy()

@@ -240,7 +240,7 @@ class TradeJournal:
             if not row:
                 return False
             
-            entry_price, quantity, stop_loss = row
+            entry_price, quantity, _ = row  # stop_loss unused but kept for readability
             
             # Calculate P&L
             pnl = (exit_price - entry_price) * quantity
@@ -273,12 +273,12 @@ class TradeJournal:
             print(f"Error updating trade: {e}")
             return False
 
-    def get_statistics(self, days: int = None) -> Dict:
+    def get_statistics(self, days: int = None) -> Dict:  # noqa: ARG002 - TODO: implement filtering by days
         """
         Get trading statistics.
         
         Args:
-            days: Last N days, or all if None
+            days: Last N days, or all if None (currently not implemented)
             
         Returns:
             Dictionary of statistics

@@ -6,7 +6,7 @@ Implements strict risk management: 0.5-1% per trade, 1.5% daily, 3% weekly.
 from dataclasses import dataclass
 from typing import Optional, Dict
 from enum import Enum
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class TradingSession(Enum):
@@ -119,7 +119,7 @@ class EnhancedRiskManager:
 
     def is_session_active(self, session: TradingSession) -> bool:
         """Check if a trading session is currently active."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         session_time = SESSIONS[session]
         
         current_hour = now.hour
@@ -192,7 +192,7 @@ class EnhancedRiskManager:
         self,
         entry_price: float,
         stop_loss: float,
-        symbol: str = ""
+        symbol: str = ""  # noqa: ARG002 - kept for API compatibility
     ) -> float:
         """
         Calculate position size in DOLLARS for the trade, not units.

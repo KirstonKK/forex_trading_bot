@@ -155,14 +155,13 @@ class BacktestEngine:
         
         return trade
 
-    def _check_trade_exit(self, current_candle: Dict, symbol: str):
+    def _check_trade_exit(self, current_candle: Dict, symbol: str):  # noqa: ARG002
         """Check if active trade should be closed."""
         if not self.active_trade:
             return
         
         low = current_candle['low']
         high = current_candle['high']
-        close = current_candle['close']
         
         # Hit stop loss
         if low <= self.active_trade['stop_loss']:
@@ -183,10 +182,7 @@ class BacktestEngine:
         if not self.active_trade:
             return
         
-        entry_price = self.active_trade['entry_price']
         risk_dollars = self.active_trade['quantity']  # This is dollars at risk
-        stop_loss = self.active_trade['stop_loss']
-        take_profit = self.active_trade['take_profit']
         
         # Simple P&L: 
         # - Stop hit = -risk_dollars

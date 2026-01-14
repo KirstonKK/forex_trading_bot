@@ -47,8 +47,7 @@ class RiskManager:
         position_type: PositionType,
         entry_price: float,
         stop_loss: float,
-        target_price: float,
-        current_price: float
+        target_price: float
     ) -> Position:
         """
         Calculate position size based on 1% risk rule.
@@ -59,7 +58,6 @@ class RiskManager:
             entry_price: Entry price level
             stop_loss: Stop loss price
             target_price: Target price
-            current_price: Current market price
             
         Returns:
             Position object with calculated size

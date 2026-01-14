@@ -80,10 +80,6 @@ class SMCAnalyzer:
         recent = candles[-20:]
         current_price = candles[-1]['close']
         
-        # Find swing points more carefully
-        highs = [c['high'] for c in recent]
-        lows = [c['low'] for c in recent]
-        
         # Identify structure in last 15 candles
         structure_candles = recent[-15:]
         s_highs = [c['high'] for c in structure_candles]

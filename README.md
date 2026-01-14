@@ -188,14 +188,14 @@ See `config/config.json` for default settings:
 
 ## Files
 
-| File                             | Purpose                             |
-| -------------------------------- | ----------------------------------- |
-| `docs/MT5_SETUP.md`              | Step-by-step MT5 account setup      |
-| `scripts/live_trading_bot.py`    | Main live trading entry point       |
-| `tests/test_mt5_connection.py`   | Validate MT5 setup before trading   |
-| `docs/DOCKER_SETUP.md`           | Docker development environment      |
-| `backtests/README.md`            | Backtesting documentation           |
-| `data/`                          | Trade journals and backtest results |
+| File                           | Purpose                             |
+| ------------------------------ | ----------------------------------- |
+| `docs/MT5_SETUP.md`            | Step-by-step MT5 account setup      |
+| `scripts/live_trading_bot.py`  | Main live trading entry point       |
+| `tests/test_mt5_connection.py` | Validate MT5 setup before trading   |
+| `docs/DOCKER_SETUP.md`         | Docker development environment      |
+| `backtests/README.md`          | Backtesting documentation           |
+| `data/`                        | Trade journals and backtest results |
 
 ## Requirements
 

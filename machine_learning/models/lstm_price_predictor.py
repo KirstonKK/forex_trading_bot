@@ -90,9 +90,8 @@ class LSTMPricePredictor:
             True if training successful
         """
         try:
-            if self.model is None:
-                if not self.build_model():
-                    return False
+            if self.model is None and not self.build_model():
+                return False
             
             # Validate input shape
             if len(X.shape) != 3:

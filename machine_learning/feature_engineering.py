@@ -68,7 +68,6 @@ class FeatureExtractor:
         
         # Trade outcome
         pnl = exit_price - entry_price
-        pnl_percent = (pnl / entry_price) * 100 if entry_price > 0 else 0
         trade_outcome = 1.0 if pnl > 0 else 0.0
         
         # Volatility at entry (ATR approximation)
@@ -83,12 +82,16 @@ class FeatureExtractor:
         if len(candles) >= 2:
             recent_close = candles[-1]['close']
             prev_close = candles[-2]['close']
-            trend_direction = 1 if recent_close > prev_close else (-1 if recent_close < prev_close else 0)
+            if recent_close > prev_close:
+                trend_direction = 1
+            elif recent_close < prev_close:
+                trend_direction = -1
+            else:
+                trend_direction = 0
         else:
             trend_direction = 0
         
-        # Time features
-        entry_time = trade.get('entry_time')
+        # Time features (simplified - would parse from entry_time in production)
         hour_of_day = 12  # Default, would parse from entry_time
         day_of_week = 2   # Default, would parse from entry_time
         

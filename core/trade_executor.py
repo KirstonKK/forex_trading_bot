@@ -138,6 +138,7 @@ class TradeExecutor:
         
         # Update trade
         trade.status = OrderStatus.CLOSED
+        trade.exit_reason = reason
         trade.exit_time = datetime.now()
         trade.pnl = pnl
         trade.pnl_percent = pnl_percent
