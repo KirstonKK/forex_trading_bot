@@ -8,6 +8,7 @@ import requests
 from typing import Dict, List, Optional
 from datetime import datetime
 import logging
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -139,11 +140,16 @@ class OANDAConnector:
             
             if response.status_code == 200:
                 prices = response.json().get('prices', [])
-                if prices:
-                    # Return mid price (average of bid and ask)
-                    bid = float(prices[0]['bids'][0]['price'])
-                    ask = float(prices[0]['asks'][0]['price'])
-                    return (bid + ask) / 2
+                if prices and len(prices) > 0:
+                    price_data = prices[0]
+                    bids = price_data.get('bids', [])
+                    asks = price_data.get('asks', [])
+                    
+                    # Ensure bids and asks arrays are not empty
+                    if bids and len(bids) > 0 and asks and len(asks) > 0:
+                        bid = float(bids[0]['price'])
+                        ask = float(asks[0]['price'])
+                        return (bid + ask) / 2
             
             return None
             
@@ -337,7 +343,7 @@ class OANDAConnector:
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('errorMessage', str(error_data))
-                except (ValueError, requests.exceptions.JSONDecodeError):
+                except (ValueError, json.JSONDecodeError):
                     error_msg = response.text
                 logger.error(f"Order failed ({response.status_code}): {error_msg}")
                 return 0
