@@ -7,11 +7,13 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 ## Trading Rules
 
 ### 1. Higher Timeframe Structure (4H/1H)
+
 - **Always start** by checking 4H or 1H timeframe
 - Determine if market is **BULLISH**, **BEARISH**, or **RANGING**
 - Only trade with the trend (no trades in ranging markets)
 
 ### 2. Order Block Selection (5-Minute)
+
 - Mark order blocks on **5-minute timeframe**
 - Order Block = Last opposing candle before strong move
   - Bullish OB: Last bearish candle before bullish rally
@@ -19,21 +21,25 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 - **Must align with higher timeframe zones**
 
 ### 3. Fibonacci Confluence
+
 - Use **79% Fibonacci retracement** level
 - Order block must overlap with 79% Fib level
 - Adds confluence to the selected zone
 
 ### 4. Fair Value Gaps (FVG) & Breaker Blocks
+
 - Detect 3-candle imbalances (FVG)
 - Price can fill FVG without mitigating your OB
 - Watch for breaker block zones as reaction areas
 
 ### 5. Market Structure Confirmation
-- Wait for **Break of Structure (BoS)** 
+
+- Wait for **Break of Structure (BoS)**
 - Wait for **Change of Character (ChoCH)**
 - Both required before entry
 
 ### 6. Liquidity Check
+
 - Look for **equal highs** and **equal lows** (liquidity pools)
 - If present, wait for market to sweep both sides
 - Enter after liquidity is taken
@@ -41,37 +47,44 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 ### 7. Pair-Specific Rules
 
 #### EURUSD & GBPUSD (EU & GU):
+
 - Watch for sweep of **Asian session high or low**
 - Entry after sweep taps into your selected zone
 - Applies to most currency pairs
 
 #### Gold (XAUUSD):
+
 - **Trade strictly with the trend**
 - Use **30-minute timeframe** for zone selection
 - Ensure 30M zones align with 4H zones
 
 ### 8. Final Rule
+
 **If all above conditions are NOT met → NO TRADE**
 
 ## Risk Management
 
 ### Risk-to-Reward (RR)
+
 - Target: **1:3 to 1:5** RR per trade
 - Typical target: **1:4** RR
 - Once daily target achieved → **STOP trading**
 
 ### Trade Limits
+
 - **Maximum 2 valid trades per day**
 - Both can be taken during London or NY session
 - If target reached in London → **No trades in NY**
 
 ### Take Profit (TP) Levels
+
 - Previous Day's Low (PDL) or High (PDH)
 - Asian Session Low or High
 - Fair Value Gaps (FVG) aligned with Order Blocks
 - Liquidity pools (equal highs/lows)
 
 ### Stop Loss (SL) Rules
+
 - Place SL **above/below the 30-minute zone** selected
 - SL must be between **50 – 120 points**
 - **Do NOT enter** trades with SL > 150 points
@@ -103,16 +116,19 @@ Before entering any trade, verify:
 ## Session Guidelines
 
 ### London Session (08:00-12:00 GMT)
+
 - Primary trading window
 - High volatility and liquidity
 - Best for EU/GU pairs
 
 ### NY Session (13:00-17:00 GMT)
+
 - Secondary trading window
 - Only if London target not met
 - Overlap with London (13:00-16:00) is ideal
 
 ### Asian Session (00:00-08:00 GMT)
+
 - **DO NOT TRADE** during Asian session
 - Use for identifying highs/lows for sweep setups
 - Mark liquidity levels for London/NY
@@ -168,4 +184,4 @@ python3 scripts/live_trading_bot.py
 
 ---
 
-*This trading plan is implemented in the Enhanced SMC Strategy module.*
+_This trading plan is implemented in the Enhanced SMC Strategy module._
