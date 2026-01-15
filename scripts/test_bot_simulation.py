@@ -174,8 +174,20 @@ class SimulatedMT5Connector:
         """Simulate order creation."""
         order_id = len(self.positions) + 1
         
-        # Use default price if not provided
-        actual_entry = entry_price if entry_price is not None else 1.0850
+        # Use symbol-appropriate default price if not provided
+        if entry_price is None:
+            default_prices = {
+                'EURUSD': 1.0850,
+                'GBPUSD': 1.2650,
+                'USDJPY': 148.50,
+                'XAUUSD': 2050.00,
+                'AUDUSD': 0.6650,
+                'USDCAD': 1.3450,
+                'NZDUSD': 0.6150
+            }
+            actual_entry = default_prices.get(symbol, 1.0000)
+        else:
+            actual_entry = entry_price
         
         self.positions.append({
             'ticket': order_id,
