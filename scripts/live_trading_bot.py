@@ -240,7 +240,7 @@ class LiveTradingBot:
             symbols_in_trades = {trade['symbol'] for trade in open_trades}
             
             # Remove closed positions from tracking
-            for symbol in self.open_positions.keys():
+            for symbol in list(self.open_positions.keys()):  # list() needed to avoid dict mutation during iteration
                 if symbol not in symbols_in_trades:
                     logger.info(f"Position closed: {symbol}")
                     del self.open_positions[symbol]
