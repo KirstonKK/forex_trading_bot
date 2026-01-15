@@ -1,12 +1,20 @@
 """
 Smart Money Concepts (SMC) Strategy
 Implements BOS (Break of Structure) + Pullback + Entry strategies.
+Uses Enhanced SMC Strategy with multi-timeframe analysis.
 """
 
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
 import numpy as np
+
+# Import enhanced strategy
+try:
+    from core.enhanced_smc_strategy import EnhancedSMCStrategy
+    USE_ENHANCED = True
+except ImportError:
+    USE_ENHANCED = False
 
 
 class StructureType(Enum):
@@ -404,3 +412,50 @@ class SMCAnalyzer:
     def analyze(self, candles: List[dict]) -> Optional[SMCEntrySignal]:
         """Perform complete SMC analysis."""
         return self.generate_entry_signal(candles)
+
+
+class SMCStrategy:
+    """
+    Main SMC Strategy class.
+    Uses enhanced strategy if available, falls back to basic strategy.
+    """
+    
+    def __init__(self, symbol: str = "EURUSD"):
+        self.symbol = symbol
+        if USE_ENHANCED:
+            self.enhanced = EnhancedSMCStrategy(symbol)
+            self.analyzer = None
+        else:
+            self.analyzer = SMCAnalyzer()
+            self.enhanced = None
+    
+    def analyze(self, candles: List[dict]) -> Optional[Dict]:
+        """
+        Analyze candles and return trading signal.
+        
+        Args:
+            candles: List of candlestick data
+            
+        Returns:
+            Signal dict with entry, SL, TP if signal found, else None
+        """
+        # Use enhanced strategy if available
+        if self.enhanced:
+            return self.enhanced.analyze(candles)
+        
+        # Fall back to basic strategy
+        signal = self.analyzer.analyze(candles)
+        if signal is None:
+            return None
+        
+        # Convert SMCEntrySignal to dict format
+        direction = "BUY" if signal.bos.structure_type == StructureType.HIGHER_HIGH else "SELL"
+        
+        return {
+            'direction': direction,
+            'entry_price': signal.entry_price,
+            'stop_loss': signal.stop_loss,
+            'take_profit': signal.target_price,
+            'confidence': signal.strength,
+            'risk_reward': signal.risk_reward_ratio
+        }
