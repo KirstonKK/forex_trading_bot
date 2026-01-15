@@ -44,6 +44,7 @@ ngrok http 5000
 ```
 
 You'll see output like:
+
 ```
 Forwarding https://abc123.ngrok.io -> http://localhost:5000
 ```
@@ -66,6 +67,7 @@ Forwarding https://abc123.ngrok.io -> http://localhost:5000
 4. In **Alert Message**, use this JSON format:
 
 #### For BUY Signal:
+
 ```json
 {
   "secret": "your_secret_key_here",
@@ -79,6 +81,7 @@ Forwarding https://abc123.ngrok.io -> http://localhost:5000
 ```
 
 #### For SELL Signal:
+
 ```json
 {
   "secret": "your_secret_key_here",
@@ -92,6 +95,7 @@ Forwarding https://abc123.ngrok.io -> http://localhost:5000
 ```
 
 #### For CLOSE Signal:
+
 ```json
 {
   "secret": "your_secret_key_here",
@@ -103,6 +107,7 @@ Forwarding https://abc123.ngrok.io -> http://localhost:5000
 ### 4.3 TradingView Variables
 
 TradingView automatically replaces these placeholders:
+
 - `{{close}}` - Current close price
 - `{{open}}` - Current open price
 - `{{high}}` - Current high
@@ -138,6 +143,7 @@ curl -X POST http://localhost:5000/webhook \
 ```
 
 Expected response:
+
 ```json
 {
   "status": "success",
