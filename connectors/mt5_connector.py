@@ -16,6 +16,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class MT5Error(Exception):
+    """Base exception for MT5 connector errors."""
+    pass
+
+
+class MT5ConnectionError(MT5Error):
+    """Raised when MT5 connection fails."""
+    pass
+
+
+class MT5DataError(MT5Error):
+    """Raised when MT5 data retrieval fails."""
+    pass
+
+
+class MT5OrderError(MT5Error):
+    """Raised when MT5 order execution fails."""
+    pass
+
+
 class MT5Connector:
     """
     MetaTrader5 connector for live trading.
@@ -47,10 +67,10 @@ class MT5Connector:
         """Connect to MT5 terminal."""
         try:
             if not mt5.initialize():
-                raise Exception(f"MT5 initialize failed: {mt5.last_error()}")
+                raise MT5ConnectionError(f"MT5 initialize failed: {mt5.last_error()}")
             
             if not mt5.login(self.login, self.password, self.server):
-                raise Exception(f"MT5 login failed: {mt5.last_error()}")
+                raise MT5ConnectionError(f"MT5 login failed: {mt5.last_error()}")
             
             self.is_connected = True
             logger.info(f"Connected to MT5 account {self.login}")
@@ -75,8 +95,7 @@ class MT5Connector:
         try:
             account_info = mt5.account_info()
             if account_info is None:
-                raise Exception(f"Failed to get account info: {mt5.last_error()}")
-            
+                raise MT5DataError(f"Failed to get account info: {mt5.last_error()}")
             balance = account_info.balance
             logger.debug(f"Account balance: {balance}")
             return balance
@@ -153,7 +172,7 @@ class MT5Connector:
             rates = mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
             
             if rates is None or len(rates) == 0:
-                raise Exception(f"Failed to get candles for {symbol}: {mt5.last_error()}")
+                raise MT5DataError(f"Failed to get candles for {symbol}: {mt5.last_error()}")
             
             # Convert to dict format
             candles = {
@@ -201,8 +220,7 @@ class MT5Connector:
             # Get current price
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
-                raise Exception(f"Cannot get price for {symbol}")
-            
+                raise MT5DataError(f"Cannot get price for {symbol}")
             price = tick.ask if order_type.upper() == 'BUY' else tick.bid
             
             # Create order request
@@ -225,7 +243,7 @@ class MT5Connector:
             result = mt5.order_send(request)
             
             if result.retcode != mt5.TRADE_RETCODE_DONE:
-                raise Exception(f"Order failed: {result.comment}")
+                raise MT5OrderError(f"Order failed: {result.comment}")
             
             logger.info(f"Order created: {order_type} {volume} {symbol} @ {price}, "
                        f"SL: {stop_loss}, TP: {take_profit}")
@@ -340,7 +358,7 @@ class MT5Connector:
         try:
             info = mt5.symbol_info(symbol)
             if info is None:
-                raise Exception(f"Symbol not found: {symbol}")
+                raise MT5DataError(f"Symbol not found: {symbol}")
             
             return {
                 'symbol': info.name,

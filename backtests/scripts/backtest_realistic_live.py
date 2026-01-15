@@ -79,8 +79,6 @@ def main():
     print("SMC STRATEGY - REALISTIC LIVE DATA BACKTEST")
     print("="*70)
     
-    logger = Logger.get_logger()
-    
     # Generate realistic 2-week data
     print("\nGenerating realistic 2-week data...")
     
@@ -97,7 +95,7 @@ def main():
     print(f"  Total: {total_candles} candles")
     
     # Run backtest
-    print(f"\nRunning backtest...")
+    print("\nRunning backtest...")
     engine = BacktestEngine(
         account_balance=10000.0,
         risk_per_trade=1.0,
@@ -113,27 +111,27 @@ def main():
     print("BACKTEST RESULTS")
     print("="*70)
     
-    print(f"\nTrade Summary:")
+    print("\nTrade Summary:")
     print(f"  Total Trades: {stats['total_trades']}")
     
     if stats['total_trades'] > 0:
         print(f"  Winning: {stats['winning_trades']} ({stats['win_rate']:.1f}%)")
         print(f"  Losing: {stats['losing_trades']}")
         
-        print(f"\nP&L Summary:")
+        print("\nP&L Summary:")
         print(f"  Total P&L: ${stats['total_pnl']:,.2f}")
-        print(f"  Initial Balance: $10,000.00")
+        print("  Initial Balance: $10,000.00")
         print(f"  Final Balance: ${stats['final_balance']:,.2f}")
         
         return_pct = ((stats['final_balance'] - 10000.0) / 10000.0 * 100)
         print(f"  Return: {return_pct:.2f}%")
         
         if return_pct > 0:
-            print(f"  ✓ Profitable")
+            print("  ✓ Profitable")
         else:
-            print(f"  ✗ Loss")
+            print("  ✗ Loss")
         
-        print(f"\nRisk Metrics:")
+        print("\nRisk Metrics:")
         print(f"  Avg Win: ${stats['avg_win']:,.2f}")
         print(f"  Avg Loss: ${stats['avg_loss']:,.2f}")
         print(f"  Profit Factor: {stats['profit_factor']:.2f}")
@@ -142,7 +140,7 @@ def main():
             max_dd = max(result.drawdown_curve)
             print(f"  Max Drawdown: {max_dd:.2f}%")
     else:
-        print(f"  No trades generated")
+        print("  No trades generated")
     
     journal_path = os.path.join(project_root, 'data/backtest_journal.db')
     print(f"\nJournal saved to: {journal_path}")

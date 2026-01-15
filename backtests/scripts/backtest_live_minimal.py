@@ -72,7 +72,7 @@ def fetch_live_data_minimal():
                                         'volume': float(parts[5]) if parts[5] != 'null' else 0
                                     }
                                     candles.append(candle)
-                                except:
+                                except (ValueError, IndexError):
                                     continue
                         
                         if candles:
@@ -100,8 +100,6 @@ def main():
     print("SMC STRATEGY - MINIMAL LIVE DATA BACKTEST")
     print("="*70)
     
-    logger = Logger.get_logger()
-    
     # Fetch live data
     historical_data = fetch_live_data_minimal()
     
@@ -110,14 +108,14 @@ def main():
         print("Tip: Check internet connection or try sample data with: python3 run_quick_backtest.py")
         return
     
-    print(f"\nData Summary:")
+    print("\nData Summary:")
     total_candles = sum(len(candles) for candles in historical_data.values())
     print(f"  Total candles: {total_candles}")
     for symbol, candles in historical_data.items():
         print(f"    {symbol}: {len(candles)} candles")
     
     # Run backtest
-    print(f"\nRunning backtest...")
+    print("\nRunning backtest...")
     engine = BacktestEngine(
         account_balance=10000.0,
         risk_per_trade=1.0,
@@ -133,20 +131,20 @@ def main():
     print("RESULTS")
     print("="*70)
     
-    print(f"\nTrade Summary:")
+    print("\nTrade Summary:")
     print(f"  Total Trades: {stats['total_trades']}")
     
     if stats['total_trades'] > 0:
         print(f"  Winning: {stats['winning_trades']} ({stats['win_rate']:.1f}%)")
         print(f"  Losing: {stats['losing_trades']}")
         
-        print(f"\nP&L Summary:")
+        print("\nP&L Summary:")
         print(f"  Total P&L: ${stats['total_pnl']:,.2f}")
-        print(f"  Initial Balance: $10,000.00")
+        print("  Initial Balance: $10,000.00")
         print(f"  Final Balance: ${stats['final_balance']:,.2f}")
         print(f"  Return: {((stats['final_balance'] - 10000.0) / 10000.0 * 100):.2f}%")
         
-        print(f"\nTrade Metrics:")
+        print("\nTrade Metrics:")
         print(f"  Avg Win: ${stats['avg_win']:,.2f}")
         print(f"  Avg Loss: ${stats['avg_loss']:,.2f}")
         print(f"  Profit Factor: {stats['profit_factor']:.2f}")
@@ -155,7 +153,7 @@ def main():
             max_dd = max(result.drawdown_curve)
             print(f"  Max Drawdown: {max_dd:.2f}%")
     else:
-        print(f"  No trades generated in 2-week period")
+        print("  No trades generated in 2-week period")
     
     print(f"\nJournal saved to: {os.path.join(project_root, 'data/backtest_journal.db')}")
     print("="*70)
