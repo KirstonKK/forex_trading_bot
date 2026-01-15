@@ -68,7 +68,7 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 
 - Target: **1:3 to 1:5** RR per trade
 - Typical target: **1:4** RR
-- **Daily Target Definition**: 
+- **Daily Target Definition**:
   - With 1% risk per trade and 1:4 RR = 4% gain per successful trade
   - Realistic daily target = **1-2 successful trades** = 4-8% potential gain
   - However, accounting for losses and partial fills, aim for **2-4% net daily growth**

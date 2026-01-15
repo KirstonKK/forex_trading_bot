@@ -72,13 +72,13 @@ The bot will automatically use OANDA REST API when you:
 
 ## MT5 vs REST API Comparison
 
-| Feature | MT5 Python | OANDA REST API |
-|---------|-----------|----------------|
-| **macOS Support** | ❌ No | ✅ Yes |
-| **Installation** | Requires MT5 terminal | Just Python requests |
-| **Speed** | Good | Excellent |
-| **Automation** | Limited | Full control |
-| **Historical Data** | Via MT5 | Direct from API |
+| Feature             | MT5 Python            | OANDA REST API       |
+| ------------------- | --------------------- | -------------------- |
+| **macOS Support**   | ❌ No                 | ✅ Yes               |
+| **Installation**    | Requires MT5 terminal | Just Python requests |
+| **Speed**           | Good                  | Excellent            |
+| **Automation**      | Limited               | Full control         |
+| **Historical Data** | Via MT5               | Direct from API      |
 
 ## Quick Start Commands
 
@@ -106,15 +106,18 @@ python3 scripts/live_trading_bot_oanda.py
 ## Troubleshooting
 
 ### Can't Find API Access Page?
+
 - Make sure you're logged into **fxTrade Practice** (not regular fxTrade)
 - Look under "Manage Funds" → "API Access"
 
 ### Token Not Working?
+
 - Make sure you copied the full token
 - Check you're using the correct account ID
 - Verify you're using "practice" environment for demo accounts
 
 ### Need Help?
+
 - OANDA API Docs: https://developer.oanda.com/rest-live-v20/introduction/
 - Support: https://www.oanda.com/contact-us/
 
