@@ -53,6 +53,56 @@ class SimulatedMT5Connector:
             'leverage': 100
         }
     
+    def _generate_synthetic_data(self, symbol: str, count: int) -> Dict:
+        """Generate synthetic candle data with valid OHLC relationships."""
+        import random
+        
+        # Set base price based on symbol
+        base_prices = {
+            'EURUSD': 1.0850,
+            'GBPUSD': 1.2650,
+            'USDJPY': 148.50,
+            'XAUUSD': 2050.00
+        }
+        base_price = base_prices.get(symbol, 1.0850)
+        
+        candles = {
+            'time': [],
+            'open': [],
+            'high': [],
+            'low': [],
+            'close': [],
+            'volume': []
+        }
+        
+        # Generate in chronological order (oldest to newest)
+        current_time = datetime.now() - timedelta(minutes=5*count)
+        price = base_price
+        
+        for i in range(count):
+            # Add 5 minutes per candle
+            candles['time'].append(int(current_time.timestamp()))
+            current_time += timedelta(minutes=5)
+            
+            # Generate realistic price movement
+            o = price + random.uniform(-0.002, 0.002) * base_price
+            c = o + random.uniform(-0.001, 0.001) * base_price
+            
+            # Ensure high >= max(o,c) and low <= min(o,c)
+            h = max(o, c) + abs(random.uniform(0, 0.0005)) * base_price
+            l = min(o, c) - abs(random.uniform(0, 0.0005)) * base_price
+            
+            candles['open'].append(o)
+            candles['high'].append(h)
+            candles['low'].append(l)
+            candles['close'].append(c)
+            candles['volume'].append(random.randint(1000, 10000))
+            
+            # Update price for next candle
+            price = c
+        
+        return candles
+    
     def get_candles(self, symbol: str, timeframe: str, count: int) -> Dict:
         """
         Simulate getting candles using yfinance for real data.
@@ -116,52 +166,31 @@ class SimulatedMT5Connector:
             
         except ImportError:
             logger.warning("[SIMULATION] yfinance not installed, using synthetic data")
-            # Generate synthetic data
-            import random
-            base_price = 1.0850 if symbol == 'EURUSD' else 1.2650
-            
-            candles = {
-                'time': [int((datetime.now() - timedelta(minutes=5*i)).timestamp()) for i in range(count)],
-                'open': [],
-                'high': [],
-                'low': [],
-                'close': [],
-                'volume': []
-            }
-            
-            for _ in range(count):
-                o = base_price + random.uniform(-0.002, 0.002)
-                c = o + random.uniform(-0.001, 0.001)
-                h = max(o, c) + random.uniform(0, 0.0005)
-                l = min(o, c) - random.uniform(0, 0.0005)
-                
-                candles['open'].append(o)
-                candles['high'].append(h)
-                candles['low'].append(l)
-                candles['close'].append(c)
-                candles['volume'].append(random.randint(1000, 10000))
-            
-            return candles
+            return self._generate_synthetic_data(symbol, count)
     
     def create_order(self, symbol: str, volume: float, order_type: str,
-                    entry_price: float = None, stop_loss: float = None,
-                    take_profit: float = None) -> int:
+                    entry_price: Optional[float] = None, stop_loss: Optional[float] = None,
+                    take_profit: Optional[float] = None) -> int:
         """Simulate order creation."""
         order_id = len(self.positions) + 1
+        
+        # Use default price if not provided
+        actual_entry = entry_price if entry_price is not None else 1.0850
         
         self.positions.append({
             'ticket': order_id,
             'symbol': symbol,
             'volume': volume,
             'type': order_type,
-            'price': entry_price or 1.0850,
+            'price': actual_entry,
             'sl': stop_loss,
             'tp': take_profit,
             'time': datetime.now()
         })
         
-        logger.info(f"[SIMULATION] Order created: {order_type} {volume} {symbol} @ {entry_price:.5f}")
-        logger.info(f"[SIMULATION]   SL: {stop_loss:.5f}, TP: {take_profit:.5f}")
+        logger.info(f"[SIMULATION] Order created: {order_type} {volume} {symbol} @ {actual_entry:.5f}")
+        if stop_loss is not None and take_profit is not None:
+            logger.info(f"[SIMULATION]   SL: {stop_loss:.5f}, TP: {take_profit:.5f}")
         
         return order_id
     
@@ -181,14 +210,20 @@ class SimulatedMT5Connector:
         } for pos in self.positions]
 
 
-def test_simulation():
+def test_simulation(login: int = None, password: str = None, server: str = None):
     """Test the bot in simulation mode."""
+    # Get credentials from environment or parameters
+    import os
+    login = login or int(os.getenv('MT5_LOGIN', '0'))
+    password = password or os.getenv('MT5_PASSWORD', 'demo_password')
+    server = server or os.getenv('MT5_SERVER', 'Demo-Server')
+    
     print("\n" + "="*60)
     print("SIMULATION MODE - Testing Bot Logic")
     print("="*60)
     print("\nUsing:")
-    print(f"  Server: Exness-MT5Trial9 (SIMULATED)")
-    print(f"  Login: 297946265")
+    print(f"  Server: {server} (SIMULATED)")
+    print(f"  Login: {login}")
     print(f"  Mode: Paper trading simulation")
     print("\n" + "="*60)
     
@@ -198,9 +233,9 @@ def test_simulation():
     
     # Create simulated connector
     mt5 = SimulatedMT5Connector(
-        login=297946265,
-        password="11Kenm!!",
-        server="Exness-MT5Trial9"
+        login=login,
+        password=password,
+        server=server
     )
     
     # Connect
@@ -236,6 +271,12 @@ def test_simulation():
         try:
             # Fetch candles
             candles = mt5.get_candles(symbol, 'M5', 100)
+            
+            # Check if candle data is valid
+            if not candles or not candles.get('close') or len(candles['close']) == 0:
+                print(f"❌ No candle data available for {symbol}")
+                continue
+            
             print(f"✓ Fetched {len(candles['close'])} candles")
             print(f"  Current Price: {candles['close'][-1]:.5f}")
             print(f"  High: {max(candles['high'][-20:]):.5f}")
