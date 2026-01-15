@@ -86,11 +86,17 @@ def main():
         print(f"\n{symbol}:")
         candles = oanda.get_candles(symbol, 'M5', 10)
         
-        if candles and candles.get('close'):
+        if candles and candles.get('close') and len(candles['close']) > 0:
             print(f"  ✓ Fetched {len(candles['close'])} candles")
             print(f"  Current Price: {candles['close'][-1]:.5f}")
-            print(f"  High: {max(candles['high'][-5:]):.5f}")
-            print(f"  Low: {min(candles['low'][-5:]):.5f}")
+            
+            # Validate arrays before computing min/max
+            if len(candles['high']) >= 5 and len(candles['low']) >= 5:
+                print(f"  High: {max(candles['high'][-5:]):.5f}")
+                print(f"  Low: {min(candles['low'][-5:]):.5f}")
+            else:
+                print(f"  High: {candles['high'][-1]:.5f}")
+                print(f"  Low: {candles['low'][-1]:.5f}")
         else:
             print(f"  ❌ Failed to fetch candles")
     

@@ -29,8 +29,13 @@ class OANDAConnector:
             api_token: Your OANDA API token
             environment: "practice" for demo, "live" for real trading
         """
+        # Validate environment to prevent accidental live trading
+        if environment not in ["practice", "live"]:
+            raise ValueError(f"Invalid environment: {environment}. Must be 'practice' or 'live'")
+        
         self.account_id = account_id
         self.api_token = api_token
+        self.environment = environment
         
         if environment == "practice":
             self.api_url = "https://api-fxpractice.oanda.com"
@@ -82,6 +87,10 @@ class OANDAConnector:
             
             if response.status_code == 200:
                 data = response.json()['account']
+                # Calculate leverage from margin rate (marginRate of 0.02 = 50:1 leverage)
+                margin_rate = float(data.get('marginRate', '0.02'))
+                leverage = int(1 / margin_rate) if margin_rate > 0 else 50
+                
                 return {
                     'balance': float(data['balance']),
                     'equity': float(data['NAV']),  # Net Asset Value
@@ -89,7 +98,7 @@ class OANDAConnector:
                     'free_margin': float(data.get('marginAvailable', 0)),
                     'profit': float(data.get('unrealizedPL', 0)),
                     'currency': data['currency'],
-                    'leverage': int(data.get('marginRate', '0.02').replace('0.', '')) if '0.' in str(data.get('marginRate', '0.02')) else 50
+                    'leverage': leverage
                 }
             else:
                 logger.error(f"Failed to get account info: {response.text}")
@@ -259,11 +268,24 @@ class OANDAConnector:
             
             if response.status_code == 201:
                 result = response.json()
-                order_id = result['orderFillTransaction']['id']
-                logger.info(f"Order created: {order_type} {volume} {symbol} (ID: {order_id})")
-                return int(order_id)
+                
+                # Check if order was filled
+                if 'orderFillTransaction' in result:
+                    order_id = result['orderFillTransaction']['id']
+                    logger.info(f"Order created: {order_type} {volume} {symbol} (ID: {order_id})")
+                    return int(order_id)
+                elif 'orderCreateTransaction' in result:
+                    # Order created but not yet filled (pending)
+                    order_id = result['orderCreateTransaction']['id']
+                    logger.warning(f"Order created but pending fill: {order_type} {volume} {symbol} (ID: {order_id})")
+                    return int(order_id)
+                else:
+                    logger.error(f"Order response unexpected: {result}")
+                    return 0
             else:
-                logger.error(f"Order failed: {response.text}")
+                error_data = response.json() if response.content else {}
+                error_msg = error_data.get('errorMessage', response.text)
+                logger.error(f"Order failed ({response.status_code}): {error_msg}")
                 return 0
                 
         except Exception as e:
@@ -287,16 +309,31 @@ class OANDAConnector:
             result = []
             
             for trade in trades:
+                instrument = trade['instrument']
+                units = abs(float(trade['currentUnits']))
+                
+                # Convert units to lots (consistent with create_order)
+                if 'XAU' in instrument:
+                    volume = units  # Gold: 1 lot = 1 unit
+                else:
+                    volume = units / 100000  # Forex: 1 lot = 100,000 units
+                
+                # Get current price from unrealizedPL calculation
+                price_open = float(trade['price'])
+                unrealized_pl = float(trade['unrealizedPL'])
+                # Current price can be approximated, but better to fetch current market price
+                price_current = price_open  # Will be updated with real-time price if needed
+                
                 result.append({
                     'ticket': int(trade['id']),
-                    'symbol': trade['instrument'].replace('_', ''),
-                    'volume': abs(float(trade['currentUnits'])) / 100000,  # Convert to lots
+                    'symbol': instrument.replace('_', ''),
+                    'volume': volume,
                     'type': 'BUY' if float(trade['currentUnits']) > 0 else 'SELL',
-                    'price_open': float(trade['price']),
+                    'price_open': price_open,
                     'sl': float(trade.get('stopLossOrder', {}).get('price', 0)) if trade.get('stopLossOrder') else 0,
                     'tp': float(trade.get('takeProfitOrder', {}).get('price', 0)) if trade.get('takeProfitOrder') else 0,
-                    'price_current': float(trade['price']),
-                    'profit': float(trade['unrealizedPL']),
+                    'price_current': price_current,
+                    'profit': unrealized_pl,
                     'time': datetime.fromisoformat(trade['openTime'].replace('Z', '+00:00'))
                 })
             

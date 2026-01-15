@@ -6,10 +6,9 @@ The MetaTrader5 Python library only works on **Windows/Linux** - it doesn't work
 
 ## Your OANDA Credentials
 
-You have MT5 credentials:
-- **Login**: 1600073321
-- **Password**: qbH0Gt4z2Ou#61
-- **Server**: OANDA_Global-Demo-1
+You have OANDA MT5 demo account credentials. These are for accessing the MT5 terminal, but for REST API access you'll need to generate an API token (see below).
+
+**Note**: Keep your credentials secure and never commit them to version control.
 
 ## Getting OANDA API Access
 
@@ -17,9 +16,7 @@ You have MT5 credentials:
 
 Go to: https://www.oanda.com/account/login
 
-Use your credentials:
-- Username: (your email or username)
-- Password: qbH0Gt4z2Ou#61
+Use your OANDA account credentials to log in.
 
 ### Step 2: Navigate to API Access
 

@@ -68,7 +68,11 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 
 - Target: **1:3 to 1:5** RR per trade
 - Typical target: **1:4** RR
-- Once daily target achieved → **STOP trading**
+- **Daily Target Definition**: 
+  - With 1% risk per trade and 1:4 RR = 4% gain per successful trade
+  - Daily target = 2 successful trades = **8% account growth**
+  - Example: On $10,000 account, daily target = $800 profit
+- Once daily target achieved → **STOP trading** for the day
 
 ### Trade Limits
 
@@ -86,8 +90,9 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 ### Stop Loss (SL) Rules
 
 - Place SL **above/below the 30-minute zone** selected
-- SL must be between **50 – 120 points**
-- **Do NOT enter** trades with SL > 150 points
+- SL must be between **50 – 120 points** (ideal range)
+- **Do NOT enter** trades with SL > 150 points (maximum allowed)
+- For reference: 1 point = 0.0001 for forex pairs (e.g., 50 points = 0.0050 = 50 pips)
 - Do not move stops prematurely
 - Only adjust SL to secure profits once trade has moved **70% toward TP**
 
