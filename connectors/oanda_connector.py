@@ -108,6 +108,49 @@ class OANDAConnector:
             logger.error(f"Error getting account info: {e}")
             return {}
     
+    def get_current_price(self, symbol: str) -> Optional[float]:
+        """
+        Get current market price for a symbol.
+        
+        Args:
+            symbol: Instrument (e.g., "EUR_USD" or "EURUSD")
+        
+        Returns:
+            Current mid price or None if error
+        """
+        try:
+            # Convert symbol format
+            if '_' not in symbol:
+                if symbol == 'XAUUSD':
+                    instrument = 'XAU_USD'
+                elif len(symbol) == 6:
+                    instrument = f"{symbol[:3]}_{symbol[3:]}"
+                else:
+                    instrument = symbol
+            else:
+                instrument = symbol
+            
+            response = requests.get(
+                f"{self.api_url}/v3/accounts/{self.account_id}/pricing",
+                headers=self.headers,
+                params={'instruments': instrument},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                prices = response.json().get('prices', [])
+                if prices:
+                    # Return mid price (average of bid and ask)
+                    bid = float(prices[0]['bids'][0]['price'])
+                    ask = float(prices[0]['asks'][0]['price'])
+                    return (bid + ask) / 2
+            
+            return None
+            
+        except Exception as e:
+            logger.debug(f"Error getting current price for {symbol}: {e}")
+            return None
+    
     def get_candles(self, symbol: str, timeframe: str, count: int) -> Dict:
         """
         Fetch candlestick data.
@@ -176,16 +219,23 @@ class OANDAConnector:
             }
             
             for candle in candles_data:
-                if not candle['complete']:
+                if not candle.get('complete', False):
                     continue  # Skip incomplete candles
                 
-                mid = candle['mid']
-                result['time'].append(int(datetime.fromisoformat(candle['time'].replace('Z', '+00:00')).timestamp()))
-                result['open'].append(float(mid['o']))
-                result['high'].append(float(mid['h']))
-                result['low'].append(float(mid['l']))
-                result['close'].append(float(mid['c']))
-                result['volume'].append(int(candle['volume']))
+                mid = candle.get('mid')
+                if not mid:
+                    continue  # Skip candles without mid prices
+                
+                try:
+                    result['time'].append(int(datetime.fromisoformat(candle['time'].replace('Z', '+00:00')).timestamp()))
+                    result['open'].append(float(mid['o']))
+                    result['high'].append(float(mid['h']))
+                    result['low'].append(float(mid['l']))
+                    result['close'].append(float(mid['c']))
+                    result['volume'].append(int(candle.get('volume', 0)))
+                except (KeyError, ValueError) as e:
+                    logger.debug(f"Skipping malformed candle: {e}")
+                    continue
             
             logger.info(f"Fetched {len(result['close'])} candles for {instrument}")
             return result
@@ -283,8 +333,12 @@ class OANDAConnector:
                     logger.error(f"Order response unexpected: {result}")
                     return 0
             else:
-                error_data = response.json() if response.content else {}
-                error_msg = error_data.get('errorMessage', response.text)
+                # Handle error response with proper JSON parsing
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('errorMessage', str(error_data))
+                except (ValueError, requests.exceptions.JSONDecodeError):
+                    error_msg = response.text
                 logger.error(f"Order failed ({response.status_code}): {error_msg}")
                 return 0
                 
@@ -318,11 +372,15 @@ class OANDAConnector:
                 else:
                     volume = units / 100000  # Forex: 1 lot = 100,000 units
                 
-                # Get current price from unrealizedPL calculation
+                # Get current market price
                 price_open = float(trade['price'])
                 unrealized_pl = float(trade['unrealizedPL'])
-                # Current price can be approximated, but better to fetch current market price
-                price_current = price_open  # Will be updated with real-time price if needed
+                
+                # Fetch actual current market price
+                price_current = self.get_current_price(instrument)
+                if price_current is None:
+                    # Fallback: estimate from unrealized P&L
+                    price_current = price_open
                 
                 result.append({
                     'ticket': int(trade['id']),

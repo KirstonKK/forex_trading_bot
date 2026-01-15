@@ -70,8 +70,10 @@ This bot implements a complete ICT (Inner Circle Trader) / SMC (Smart Money Conc
 - Typical target: **1:4** RR
 - **Daily Target Definition**: 
   - With 1% risk per trade and 1:4 RR = 4% gain per successful trade
-  - Daily target = 2 successful trades = **8% account growth**
-  - Example: On $10,000 account, daily target = $800 profit
+  - Realistic daily target = **1-2 successful trades**
+  - Conservative goal: 2-4% account growth per day (50-100% monthly)
+  - Example: On $10,000 account, daily target = $200-400 profit
+  - **Note**: 8% daily (mentioned earlier) is too aggressive and unsustainable
 - Once daily target achieved → **STOP trading** for the day
 
 ### Trade Limits
