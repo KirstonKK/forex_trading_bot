@@ -220,7 +220,7 @@ class MT5Connector:
             # Get current price
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
-                raise MT5DataError(f"Cannot get price for {symbol}")
+                raise MT5DataError(f"Cannot get price for {symbol}: {mt5.last_error()}")
             price = tick.ask if order_type.upper() == 'BUY' else tick.bid
             
             # Create order request
@@ -358,7 +358,7 @@ class MT5Connector:
         try:
             info = mt5.symbol_info(symbol)
             if info is None:
-                raise MT5DataError(f"Symbol not found: {symbol}")
+                raise MT5DataError(f"Symbol not found: {symbol}: {mt5.last_error()}")
             
             return {
                 'symbol': info.name,
