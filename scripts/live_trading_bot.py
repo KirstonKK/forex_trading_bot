@@ -16,6 +16,7 @@ Environment Variables:
 import os
 import logging
 from datetime import datetime
+from typing import Optional
 from connectors.mt5_connector import MT5Connector
 from core.smc_strategy import SMCStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
@@ -81,7 +82,7 @@ class LiveTradingBot:
         logger.info(f"Poll interval: {self.poll_interval}s")
     
     def fetch_latest_candles(self, symbol: str, timeframe: str = 'M5', 
-                            count: int = 100) -> dict:
+                            count: int = 100) -> Optional[dict]:
         """
         Fetch latest candlestick data.
         
@@ -91,7 +92,7 @@ class LiveTradingBot:
             count: Number of candles
         
         Returns:
-            Candle data dict
+            Candle data dict or None if error
         """
         try:
             candles = self.mt5.get_candles(symbol, timeframe, count)
@@ -101,7 +102,7 @@ class LiveTradingBot:
             logger.error(f"Error fetching candles for {symbol}: {e}")
             return None
     
-    def analyze_symbol(self, symbol: str) -> dict:
+    def analyze_symbol(self, symbol: str) -> Optional[dict]:
         """
         Analyze symbol for SMC signals.
         
@@ -239,7 +240,7 @@ class LiveTradingBot:
             symbols_in_trades = {trade['symbol'] for trade in open_trades}
             
             # Remove closed positions from tracking
-            for symbol in list(self.open_positions.keys()):
+            for symbol in self.open_positions.keys():
                 if symbol not in symbols_in_trades:
                     logger.info(f"Position closed: {symbol}")
                     del self.open_positions[symbol]
