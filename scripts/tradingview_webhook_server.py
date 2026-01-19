@@ -255,12 +255,7 @@ def get_signals():
                 # Convert data formats
                 candles_5m_list = convert_to_candles_list(data_5m)
                 candles_4h_list = convert_to_candles_list(data_4h)
-            
-            signal = strategy.analyze(
-                candles_5m=candles_5m_list,
-                candles_htf=candles_4h_list
-            )
-            
+                
                 signal = strategy.analyze(
                     candles_5m=candles_5m_list,
                     candles_htf=candles_4h_list
@@ -273,6 +268,8 @@ def get_signals():
                     signals[symbol] = signal
                 else:
                     signals[symbol] = {'status': 'no_setup'}
+            else:
+                signals[symbol] = {'status': 'insufficient_data'}
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Error analyzing {symbol}: {e}")
             signals[symbol] = {'status': 'error', 'message': str(e)}
@@ -290,7 +287,7 @@ if __name__ == '__main__':
     print("TRADINGVIEW STRATEGY ANALYZER")
     print("="*70)
     print("Mode: ANALYSIS ONLY (No broker, no real trades)")
-    print(f"Webhook Secret: {WEBHOOK_SECRET}")
+    print("Webhook Secret: " + ("*" * 8) + " (configured)" if WEBHOOK_SECRET and WEBHOOK_SECRET != 'your_secret_key_here' else "WARNING: Using default secret!")
     print(f"\nServer starting on http://localhost:{PORT}")
     print("\nEndpoints:")
     print("  POST /webhook  - Receive TradingView market data")

@@ -432,11 +432,10 @@
                                     <h3>${escapeHtml(symbol)}</h3>
                                     <div class="price">${latest5M.toFixed(5)} <span class="${changeClass}">${change}%</span></div>
                                 </div>
-                                    <div style="text-align: right;">
-                                        <div class="candle-count">5M: ${(symbolData['5M']?.close?.length || 0)} candles</div>
-                                        <div class="candle-count">1H: ${(symbolData['1H']?.close?.length || 0)} candles</div>
-                                        <div class="candle-count">4H: ${(symbolData['4H']?.close?.length || 0)} candles</div>
-                                    </div>
+                                <div style="text-align: right;">
+                                    <div class="candle-count">5M: ${(symbolData['5M']?.close?.length || 0)} candles</div>
+                                    <div class="candle-count">1H: ${(symbolData['1H']?.close?.length || 0)} candles</div>
+                                    <div class="candle-count">4H: ${(symbolData['4H']?.close?.length || 0)} candles</div>
                                 </div>
                             </div>
                         `;
