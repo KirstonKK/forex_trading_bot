@@ -303,6 +303,17 @@
     <script>
         let startTime = new Date();
 
+        // HTML escape function to prevent XSS
+        function escapeHtml(unsafe) {
+            if (unsafe == null) return '';
+            return String(unsafe)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
         async function fetchHealth() {
             try {
                 const response = await fetch('/health');
@@ -310,14 +321,18 @@
                 
                 document.getElementById('status').textContent = '● Online';
                 document.getElementById('status').classList.remove('offline');
-                document.getElementById('mode').textContent = data.mode.replace('_', ' ').toUpperCase();
-                document.getElementById('symbol-count').textContent = data.symbols_tracked.length;
+                document.getElementById('mode').textContent = (data.mode || 'unknown').replace('_', ' ').toUpperCase();
+                document.getElementById('symbol-count').textContent = (data.symbols_tracked || []).length;
                 
-                if (data.symbols_tracked.length > 0) {
+                if (data.symbols_tracked && data.symbols_tracked.length > 0) {
                     const symbolList = document.getElementById('symbol-list');
-                    symbolList.innerHTML = data.symbols_tracked.map(s => 
-                        `<span class="symbol-badge">${s}</span>`
-                    ).join('');
+                    symbolList.textContent = ''; // Clear safely
+                    data.symbols_tracked.forEach(s => {
+                        const span = document.createElement('span');
+                        span.className = 'symbol-badge';
+                        span.textContent = s; // Safe text assignment
+                        symbolList.appendChild(span);
+                    });
                 }
                 
                 updateUptime();
@@ -336,26 +351,43 @@
                 const container = document.getElementById('signals-container');
                 
                 if (data.signals && Object.keys(data.signals).length > 0) {
-                    container.innerHTML = '';
+                    container.textContent = ''; // Clear safely
                     
                     for (const [symbol, signal] of Object.entries(data.signals)) {
-                        if (signal.status === 'no_setup') {
+                        if (!signal || signal.status === 'no_setup' || signal.status === 'error') {
                             continue;
                         }
                         
-                        const signalClass = signal.type === 'BUY' ? 'signal' : 'signal sell';
-                        container.innerHTML += `
-                            <div class="${signalClass}">
-                                <h3>${signal.type} ${symbol}</h3>
-                                <div class="signal-details">
-                                    <div><strong>Entry:</strong> ${signal.entry.toFixed(5)}</div>
-                                    <div><strong>Stop Loss:</strong> ${signal.stop_loss.toFixed(5)}</div>
-                                    <div><strong>Take Profit:</strong> ${signal.take_profit.toFixed(5)}</div>
-                                    <div><strong>Risk/Reward:</strong> 1:${signal.risk_reward.toFixed(2)}</div>
-                                    <div style="grid-column: 1 / -1;"><strong>Setup:</strong> ${signal.reason || 'SMC Confluence'}</div>
-                                </div>
-                            </div>
+                        // Validate required fields
+                        if (!signal.type || !signal.entry || !signal.stop_loss || !signal.take_profit) {
+                            continue;
+                        }
+                        
+                        const signalDiv = document.createElement('div');
+                        signalDiv.className = signal.type === 'BUY' ? 'signal' : 'signal sell';
+                        
+                        const h3 = document.createElement('h3');
+                        h3.textContent = `${signal.type} ${symbol}`;
+                        signalDiv.appendChild(h3);
+                        
+                        const detailsDiv = document.createElement('div');
+                        detailsDiv.className = 'signal-details';
+                        
+                        const entry = parseFloat(signal.entry) || 0;
+                        const stopLoss = parseFloat(signal.stop_loss) || 0;
+                        const takeProfit = parseFloat(signal.take_profit) || 0;
+                        const riskReward = parseFloat(signal.risk_reward) || 0;
+                        
+                        detailsDiv.innerHTML = `
+                            <div><strong>Entry:</strong> ${entry.toFixed(5)}</div>
+                            <div><strong>Stop Loss:</strong> ${stopLoss.toFixed(5)}</div>
+                            <div><strong>Take Profit:</strong> ${takeProfit.toFixed(5)}</div>
+                            <div><strong>Risk/Reward:</strong> 1:${riskReward.toFixed(2)}</div>
+                            <div style="grid-column: 1 / -1;"><strong>Setup:</strong> ${escapeHtml(signal.reason || 'SMC Confluence')}</div>
                         `;
+                        
+                        signalDiv.appendChild(detailsDiv);
+                        container.appendChild(signalDiv);
                     }
                 } else {
                     container.innerHTML = '<div class="no-signals">No active signals. Waiting for market setup...</div>';
@@ -372,30 +404,43 @@
                 const container = document.getElementById('market-data');
                 
                 if (data.symbols && data.symbols.length > 0) {
-                    container.innerHTML = '';
+                    container.textContent = ''; // Clear safely
                     
                     for (const symbol of data.symbols) {
                         const symbolData = data.data[symbol];
-                        const latest5M = symbolData['5M'].close[symbolData['5M'].close.length - 1];
-                        const prev5M = symbolData['5M'].close[symbolData['5M'].close.length - 2];
-                        const change = ((latest5M - prev5M) / prev5M * 100).toFixed(2);
-                        const changeClass = change >= 0 ? 'positive' : 'negative';
+                        if (!symbolData || !symbolData['5M'] || !symbolData['5M'].close) {
+                            continue;
+                        }
                         
-                        container.innerHTML += `
-                            <div class="chart-container">
-                                <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <div>
-                                        <h3>${symbol}</h3>
-                                        <div class="price">${latest5M.toFixed(5)} <span class="${changeClass}">${change}%</span></div>
-                                    </div>
+                        const closeData = symbolData['5M'].close;
+                        if (closeData.length < 2) {
+                            continue; // Need at least 2 data points
+                        }
+                        
+                        const latest5M = closeData[closeData.length - 1];
+                        const prev5M = closeData[closeData.length - 2];
+                        
+                        // Prevent division by zero
+                        const change = prev5M !== 0 ? ((latest5M - prev5M) / prev5M * 100).toFixed(2) : '0.00';
+                        const changeClass = parseFloat(change) >= 0 ? 'positive' : 'negative';
+                        
+                        const chartDiv = document.createElement('div');
+                        chartDiv.className = 'chart-container';
+                        chartDiv.innerHTML = `
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <div>
+                                    <h3>${escapeHtml(symbol)}</h3>
+                                    <div class="price">${latest5M.toFixed(5)} <span class="${changeClass}">${change}%</span></div>
+                                </div>
                                     <div style="text-align: right;">
-                                        <div class="candle-count">5M: ${symbolData['5M'].close.length} candles</div>
-                                        <div class="candle-count">1H: ${symbolData['1H'].close.length} candles</div>
-                                        <div class="candle-count">4H: ${symbolData['4H'].close.length} candles</div>
+                                        <div class="candle-count">5M: ${(symbolData['5M']?.close?.length || 0)} candles</div>
+                                        <div class="candle-count">1H: ${(symbolData['1H']?.close?.length || 0)} candles</div>
+                                        <div class="candle-count">4H: ${(symbolData['4H']?.close?.length || 0)} candles</div>
                                     </div>
                                 </div>
                             </div>
                         `;
+                        container.appendChild(chartDiv);
                     }
                 }
             } catch (error) {

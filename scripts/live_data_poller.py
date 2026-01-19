@@ -26,7 +26,7 @@ WEBHOOK_SECRET = "your_secret_key_here"
 # Currency pairs to track
 PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD']
 
-# Free forex API endpoint (12Forex.com - no API key needed)
+# Free forex API endpoint (ExchangeRate-API.com - no API key needed)
 API_BASE = "https://api.exchangerate-api.com/v4/latest/"
 
 def fetch_current_price(base_currency='EUR', quote_currency='USD'):
@@ -37,13 +37,20 @@ def fetch_current_price(base_currency='EUR', quote_currency='USD'):
         
         if response.status_code == 200:
             data = response.json()
-            rate = data['rates'].get(quote_currency)
+            rates = data.get('rates')
+            if rates is None:
+                logger.error("API response missing 'rates' key")
+                return None
+            rate = rates.get(quote_currency)
             return rate
         else:
             logger.warning(f"API returned {response.status_code}")
             return None
-    except Exception as e:
-        logger.error(f"Error fetching price: {e}")
+    except requests.RequestException as e:
+        logger.error(f"Network error fetching price: {e}")
+        return None
+    except (ValueError, KeyError) as e:
+        logger.error(f"Invalid API response: {e}")
         return None
 
 
@@ -172,9 +179,12 @@ def poll_live_data():
         except KeyboardInterrupt:
             logger.info("Stopping poller...")
             break
-        except Exception as e:
+        except (requests.RequestException, ValueError, KeyError) as e:
             logger.error(f"Error in polling loop: {e}")
             time.sleep(30)  # Wait 30 seconds on error
+        except Exception as e:
+            logger.error(f"Unexpected error in polling loop: {e}", exc_info=True)
+            time.sleep(30)
 
 
 if __name__ == '__main__':

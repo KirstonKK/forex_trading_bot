@@ -43,7 +43,11 @@ STATIC_DIR = os.path.join(BASE_DIR, 'static')
 app = Flask(__name__, static_folder=STATIC_DIR)
 
 # Configuration
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'your_secret_key_here')
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
+if not WEBHOOK_SECRET or WEBHOOK_SECRET == 'your_secret_key_here':
+    logger.warning("WARNING: Using default webhook secret. Set WEBHOOK_SECRET environment variable for production!")
+    WEBHOOK_SECRET = 'your_secret_key_here'
+
 ACCOUNT_BALANCE = 10000.0
 
 # Store market data in memory
@@ -162,12 +166,12 @@ def webhook():
             
             if signal:
                 logger.info(f"\n🎯 SIGNAL DETECTED FOR {symbol}!")
-                logger.info(f"   Type: {signal['direction']}")
-                logger.info(f"   Entry: {signal['entry_price']:.5f}")
-                logger.info(f"   Stop Loss: {signal['stop_loss']:.5f}")
-                logger.info(f"   Take Profit: {signal['take_profit']:.5f}")
-                logger.info(f"   Risk/Reward: 1:{signal['risk_reward']:.2f}")
-                logger.info(f"   Confidence: {signal['confidence']:.2f}")
+                logger.info(f"   Type: {signal.get('direction', 'UNKNOWN')}")
+                logger.info(f"   Entry: {signal.get('entry_price', 0):.5f}")
+                logger.info(f"   Stop Loss: {signal.get('stop_loss', 0):.5f}")
+                logger.info(f"   Take Profit: {signal.get('take_profit', 0):.5f}")
+                logger.info(f"   Risk/Reward: 1:{signal.get('risk_reward', 0):.2f}")
+                logger.info(f"   Confidence: {signal.get('confidence', 0):.2f}")
                 
                 # Normalize signal structure for frontend
                 signal['type'] = signal['direction']
@@ -239,26 +243,39 @@ def get_signals():
     """Get latest signals for all tracked symbols."""
     signals = {}
     for symbol, data in market_data.items():
-        if (len(data.get('4H', {}).get('close', [])) >= 50 and
-            len(data.get('1H', {}).get('close', [])) >= 50 and
-            len(data.get('5M', {}).get('close', [])) >= 50):
+        try:
+            data_4h = data.get('4H', {})
+            data_1h = data.get('1H', {})
+            data_5m = data.get('5M', {})
             
-            # Convert data formats
-            candles_5m_list = convert_to_candles_list(data['5M'])
-            candles_4h_list = convert_to_candles_list(data['4H'])
+            if (len(data_4h.get('close', [])) >= 50 and
+                len(data_1h.get('close', [])) >= 50 and
+                len(data_5m.get('close', [])) >= 50):
+                
+                # Convert data formats
+                candles_5m_list = convert_to_candles_list(data_5m)
+                candles_4h_list = convert_to_candles_list(data_4h)
             
             signal = strategy.analyze(
                 candles_5m=candles_5m_list,
                 candles_htf=candles_4h_list
             )
             
-            if signal:
-                # Normalize keys for frontend
-                signal['type'] = signal['direction']
-                signal['entry'] = signal['entry_price']
-                signals[symbol] = signal
-            else:
-                signals[symbol] = {'status': 'no_setup'}
+                signal = strategy.analyze(
+                    candles_5m=candles_5m_list,
+                    candles_htf=candles_4h_list
+                )
+                
+                if signal:
+                    # Normalize keys for frontend
+                    signal['type'] = signal.get('direction', 'UNKNOWN')
+                    signal['entry'] = signal.get('entry_price', 0)
+                    signals[symbol] = signal
+                else:
+                    signals[symbol] = {'status': 'no_setup'}
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Error analyzing {symbol}: {e}")
+            signals[symbol] = {'status': 'error', 'message': str(e)}
     
     return jsonify({
         'status': 'success',
