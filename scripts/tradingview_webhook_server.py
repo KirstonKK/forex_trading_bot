@@ -281,7 +281,7 @@ def get_signals():
 
 
 if __name__ == '__main__':
-    PORT = 5001
+    PORT = 5000
     
     print("\n" + "="*70)
     print("TRADINGVIEW STRATEGY ANALYZER")
@@ -299,7 +299,7 @@ if __name__ == '__main__':
     print(f"  2. Run: ngrok http {PORT}")
     print("  3. Copy HTTPS URL (e.g., https://abc123.ngrok.io)")
     print("  4. In TradingView, create alert with webhook:")
-    print(f"     https://abc123.ngrok.io/webhook")
+    print("     https://abc123.ngrok.io/webhook")
     print("\n📊 Your strategy will analyze real TradingView data")
     print("   Signals will be logged (no trades executed)")
     print("="*70 + "\n")
