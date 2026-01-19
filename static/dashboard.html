@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forex Trading Bot - ICT/SMC Strategy Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 20px 30px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            backdrop-filter: blur(10px);
+        }
+
+        h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            background: #10b981;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-right: 10px;
+        }
+
+        .status.offline {
+            background: #ef4444;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .card h2 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: #60a5fa;
+        }
+
+        .stat {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .stat:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: #d1d5db;
+        }
+
+        .stat-value {
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+
+        .signal {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+        }
+
+        .signal.sell {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .signal h3 {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+
+        .signal-details {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            font-size: 0.9em;
+        }
+
+        .no-signals {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+            font-style: italic;
+        }
+
+        .chart-container {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+        }
+
+        .symbol-list {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .symbol-badge {
+            background: rgba(96, 165, 250, 0.3);
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            border: 1px solid rgba(96, 165, 250, 0.5);
+        }
+
+        .timestamp {
+            color: #9ca3af;
+            font-size: 0.85em;
+            margin-top: 15px;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: transform 0.2s;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .price {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+
+        .positive {
+            color: #10b981;
+        }
+
+        .negative {
+            color: #ef4444;
+        }
+
+        .candle-count {
+            font-size: 0.8em;
+            color: #9ca3af;
+        }
+
+        .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .instruction {
+            background: rgba(251, 191, 36, 0.2);
+            border-left: 4px solid #fbbf24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
+        }
+
+        .instruction h3 {
+            color: #fbbf24;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Forex Trading Bot Dashboard</h1>
+            <p>ICT/SMC Strategy Analyzer • TradingView Integration</p>
+            <div style="margin-top: 10px;">
+                <span class="status" id="status">● Checking...</span>
+                <span id="last-update" class="timestamp"></span>
+            </div>
+        </header>
+
+        <div class="grid">
+            <!-- Server Status -->
+            <div class="card">
+                <h2>📊 Server Status</h2>
+                <div class="stat">
+                    <span class="stat-label">Mode</span>
+                    <span class="stat-value" id="mode">Analysis Only</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Active Symbols</span>
+                    <span class="stat-value" id="symbol-count">0</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Uptime</span>
+                    <span class="stat-value" id="uptime">--</span>
+                </div>
+                <button class="btn" onclick="refreshData()" style="margin-top: 15px; width: 100%;">
+                    Refresh Data
+                </button>
+            </div>
+
+            <!-- Tracked Symbols -->
+            <div class="card">
+                <h2>📈 Tracked Symbols</h2>
+                <div class="symbol-list" id="symbol-list">
+                    <div class="no-signals">No symbols tracked yet</div>
+                </div>
+                <div class="instruction">
+                    <h3>How to Add Data</h3>
+                    <p style="font-size: 0.9em;">Set up TradingView alerts with webhook: <code>http://localhost:5001/webhook</code></p>
+                </div>
+            </div>
+
+            <!-- Account Overview -->
+            <div class="card">
+                <h2>💰 Account Overview</h2>
+                <div class="stat">
+                    <span class="stat-label">Starting Balance</span>
+                    <span class="stat-value">$10,000.00</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Risk Per Trade</span>
+                    <span class="stat-value">1.0%</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Max Daily Loss</span>
+                    <span class="stat-value">4.0%</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Max Trades/Day</span>
+                    <span class="stat-value">2</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trading Signals -->
+        <div class="card full-width">
+            <h2>🎯 Active Trading Signals</h2>
+            <div id="signals-container">
+                <div class="no-signals">
+                    <div class="loading"></div>
+                    <p style="margin-top: 15px;">Loading signals...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Market Data -->
+        <div class="card full-width">
+            <h2>📉 Market Data Overview</h2>
+            <div id="market-data">
+                <div class="no-signals">No market data received yet</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let startTime = new Date();
+
+        async function fetchHealth() {
+            try {
+                const response = await fetch('/health');
+                const data = await response.json();
+                
+                document.getElementById('status').textContent = '● Online';
+                document.getElementById('status').classList.remove('offline');
+                document.getElementById('mode').textContent = data.mode.replace('_', ' ').toUpperCase();
+                document.getElementById('symbol-count').textContent = data.symbols_tracked.length;
+                
+                if (data.symbols_tracked.length > 0) {
+                    const symbolList = document.getElementById('symbol-list');
+                    symbolList.innerHTML = data.symbols_tracked.map(s => 
+                        `<span class="symbol-badge">${s}</span>`
+                    ).join('');
+                }
+                
+                updateUptime();
+                return true;
+            } catch (error) {
+                document.getElementById('status').textContent = '● Offline';
+                document.getElementById('status').classList.add('offline');
+                return false;
+            }
+        }
+
+        async function fetchSignals() {
+            try {
+                const response = await fetch('/signals');
+                const data = await response.json();
+                const container = document.getElementById('signals-container');
+                
+                if (data.signals && Object.keys(data.signals).length > 0) {
+                    container.innerHTML = '';
+                    
+                    for (const [symbol, signal] of Object.entries(data.signals)) {
+                        if (signal.status === 'no_setup') {
+                            continue;
+                        }
+                        
+                        const signalClass = signal.type === 'BUY' ? 'signal' : 'signal sell';
+                        container.innerHTML += `
+                            <div class="${signalClass}">
+                                <h3>${signal.type} ${symbol}</h3>
+                                <div class="signal-details">
+                                    <div><strong>Entry:</strong> ${signal.entry.toFixed(5)}</div>
+                                    <div><strong>Stop Loss:</strong> ${signal.stop_loss.toFixed(5)}</div>
+                                    <div><strong>Take Profit:</strong> ${signal.take_profit.toFixed(5)}</div>
+                                    <div><strong>Risk/Reward:</strong> 1:${signal.risk_reward.toFixed(2)}</div>
+                                    <div style="grid-column: 1 / -1;"><strong>Setup:</strong> ${signal.reason || 'SMC Confluence'}</div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    container.innerHTML = '<div class="no-signals">No active signals. Waiting for market setup...</div>';
+                }
+            } catch (error) {
+                console.error('Error fetching signals:', error);
+            }
+        }
+
+        async function fetchMarketData() {
+            try {
+                const response = await fetch('/data');
+                const data = await response.json();
+                const container = document.getElementById('market-data');
+                
+                if (data.symbols && data.symbols.length > 0) {
+                    container.innerHTML = '';
+                    
+                    for (const symbol of data.symbols) {
+                        const symbolData = data.data[symbol];
+                        const latest5M = symbolData['5M'].close[symbolData['5M'].close.length - 1];
+                        const prev5M = symbolData['5M'].close[symbolData['5M'].close.length - 2];
+                        const change = ((latest5M - prev5M) / prev5M * 100).toFixed(2);
+                        const changeClass = change >= 0 ? 'positive' : 'negative';
+                        
+                        container.innerHTML += `
+                            <div class="chart-container">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div>
+                                        <h3>${symbol}</h3>
+                                        <div class="price">${latest5M.toFixed(5)} <span class="${changeClass}">${change}%</span></div>
+                                    </div>
+                                    <div style="text-align: right;">
+                                        <div class="candle-count">5M: ${symbolData['5M'].close.length} candles</div>
+                                        <div class="candle-count">1H: ${symbolData['1H'].close.length} candles</div>
+                                        <div class="candle-count">4H: ${symbolData['4H'].close.length} candles</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching market data:', error);
+            }
+        }
+
+        function updateUptime() {
+            const now = new Date();
+            const diff = Math.floor((now - startTime) / 1000);
+            const hours = Math.floor(diff / 3600);
+            const minutes = Math.floor((diff % 3600) / 60);
+            const seconds = diff % 60;
+            
+            document.getElementById('uptime').textContent = 
+                `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            
+            document.getElementById('last-update').textContent = 
+                `Last update: ${now.toLocaleTimeString()}`;
+        }
+
+        async function refreshData() {
+            await fetchHealth();
+            await fetchSignals();
+            await fetchMarketData();
+        }
+
+        // Initial load
+        refreshData();
+
+        // Auto-refresh every 5 seconds
+        setInterval(refreshData, 5000);
+        setInterval(updateUptime, 1000);
+    </script>
+</body>
+</html>

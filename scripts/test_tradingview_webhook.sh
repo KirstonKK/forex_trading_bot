@@ -5,7 +5,7 @@ echo "Testing TradingView Webhook Server..."
 echo ""
 
 # Check if server is running
-if ! curl -s http://localhost:8080/health > /dev/null; then
+if ! curl -s http://localhost:5001/health > /dev/null; then
     echo "❌ Server not running. Start it with:"
     echo "   python3 scripts/tradingview_webhook_server.py"
     exit 1
@@ -20,7 +20,7 @@ for i in {1..55}; do
     PRICE=$(echo "1.0300 + $i * 0.0001" | bc -l)
     TIME=$((1736967000 + i * 300))
     
-    curl -s -X POST http://localhost:8080/webhook \
+    curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
         \"secret\": \"your_secret_key_here\",
@@ -48,7 +48,7 @@ for i in {1..55}; do
     PRICE=$(echo "1.0300 + $i * 0.0002" | bc -l)
     TIME=$((1736900000 + i * 3600))
     
-    curl -s -X POST http://localhost:8080/webhook \
+    curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
         \"secret\": \"your_secret_key_here\",
@@ -76,7 +76,7 @@ for i in {1..55}; do
     PRICE=$(echo "1.0300 + $i * 0.0003" | bc -l)
     TIME=$((1736800000 + i * 14400))
     
-    curl -s -X POST http://localhost:8080/webhook \
+    curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
         \"secret\": \"your_secret_key_here\",
@@ -100,7 +100,7 @@ echo ""
 
 # Check for signals
 echo "Checking for trading signals..."
-curl -s http://localhost:8080/signals | python3 -m json.tool
+curl -s http://localhost:5001/signals | python3 -m json.tool
 
 echo ""
 echo "Done! Check logs/webhook.log for detailed analysis"

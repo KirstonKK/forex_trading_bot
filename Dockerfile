@@ -31,7 +31,7 @@ COPY . .
 RUN mkdir -p data logs backtests/results
 
 # Expose ports for potential monitoring/API
-EXPOSE 8000 8080
+EXPOSE 8000 5001
 
 # Set default command to run backtests
 # Can be overridden by user

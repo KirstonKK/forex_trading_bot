@@ -14,7 +14,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime
 import logging
 import json
@@ -35,8 +35,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Resolve absolute paths
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
+
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, static_folder=STATIC_DIR)
 
 # Configuration
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'your_secret_key_here')
@@ -44,6 +48,24 @@ ACCOUNT_BALANCE = 10000.0
 
 # Store market data in memory
 market_data = {}
+
+def convert_to_candles_list(columnar_data):
+    """Convert columnar market data to list of dicts for strategy."""
+    if not columnar_data or not columnar_data.get('time'):
+        return []
+    
+    length = len(columnar_data['time'])
+    candles = []
+    for i in range(length):
+        candles.append({
+            'time': columnar_data['time'][i],
+            'open': columnar_data['open'][i],
+            'high': columnar_data['high'][i],
+            'low': columnar_data['low'][i],
+            'close': columnar_data['close'][i],
+            'volume': columnar_data['volume'][i]
+        })
+    return candles
 
 # Initialize strategy
 strategy = EnhancedSMCStrategy()
@@ -127,27 +149,34 @@ def webhook():
             
             # Run strategy analysis
             current_price = data.get('close', 0)
-            signal = strategy.generate_signal(
-                symbol=symbol,
-                candles_4h=market_data[symbol]['4H'],
-                candles_1h=market_data[symbol]['1H'],
-                candles_5m=market_data[symbol]['5M'],
-                current_price=current_price
+            
+            # Convert data formats
+            candles_5m_list = convert_to_candles_list(market_data[symbol]['5M'])
+            candles_4h_list = convert_to_candles_list(market_data[symbol]['4H'])
+            
+            # Use analyze() method instead of generate_signal() for correct formatting
+            signal = strategy.analyze(
+                candles_5m=candles_5m_list,
+                candles_htf=candles_4h_list
             )
             
             if signal:
                 logger.info(f"\n🎯 SIGNAL DETECTED FOR {symbol}!")
-                logger.info(f"   Type: {signal['type']}")
-                logger.info(f"   Entry: {signal['entry']:.5f}")
+                logger.info(f"   Type: {signal['direction']}")
+                logger.info(f"   Entry: {signal['entry_price']:.5f}")
                 logger.info(f"   Stop Loss: {signal['stop_loss']:.5f}")
                 logger.info(f"   Take Profit: {signal['take_profit']:.5f}")
                 logger.info(f"   Risk/Reward: 1:{signal['risk_reward']:.2f}")
-                logger.info(f"   Reason: {signal.get('reason', 'SMC setup')}")
+                logger.info(f"   Confidence: {signal['confidence']:.2f}")
+                
+                # Normalize signal structure for frontend
+                signal['type'] = signal['direction']
+                signal['entry'] = signal['entry_price']
                 
                 return jsonify({
                     'status': 'signal_detected',
                     'signal': signal,
-                    'message': f'{signal["type"]} signal for {symbol}'
+                    'message': f'{signal["direction"]} signal for {symbol}'
                 }), 200
             else:
                 return jsonify({
@@ -168,6 +197,12 @@ def webhook():
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/')
+def dashboard():
+    """Serve the trading dashboard."""
+    return send_from_directory(STATIC_DIR, 'dashboard.html')
 
 
 @app.route('/health', methods=['GET'])
@@ -208,15 +243,22 @@ def get_signals():
             len(data.get('1H', {}).get('close', [])) >= 50 and
             len(data.get('5M', {}).get('close', [])) >= 50):
             
-            current_price = data['5M']['close'][-1]
-            signal = strategy.generate_signal(
-                symbol=symbol,
-                candles_4h=data['4H'],
-                candles_1h=data['1H'],
-                candles_5m=data['5M'],
-                current_price=current_price
+            # Convert data formats
+            candles_5m_list = convert_to_candles_list(data['5M'])
+            candles_4h_list = convert_to_candles_list(data['4H'])
+            
+            signal = strategy.analyze(
+                candles_5m=candles_5m_list,
+                candles_htf=candles_4h_list
             )
-            signals[symbol] = signal if signal else {'status': 'no_setup'}
+            
+            if signal:
+                # Normalize keys for frontend
+                signal['type'] = signal['direction']
+                signal['entry'] = signal['entry_price']
+                signals[symbol] = signal
+            else:
+                signals[symbol] = {'status': 'no_setup'}
     
     return jsonify({
         'status': 'success',
@@ -225,7 +267,7 @@ def get_signals():
 
 
 if __name__ == '__main__':
-    PORT = 8080
+    PORT = 5001
     
     print("\n" + "="*70)
     print("TRADINGVIEW STRATEGY ANALYZER")
