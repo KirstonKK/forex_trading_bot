@@ -21,7 +21,7 @@ import json
 from typing import Dict, List
 
 # Import strategy only (no broker connectors)
-from core.enhanced_smc_strategy import EnhancedSMCStrategy
+from core.flexible_ict_strategy import FlexibleICTStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
 
 # Setup logging
@@ -72,7 +72,7 @@ def convert_to_candles_list(columnar_data):
     return candles
 
 # Initialize strategy
-strategy = EnhancedSMCStrategy()
+strategy = FlexibleICTStrategy()
 
 # Initialize risk manager
 risk_manager = EnhancedRiskManager(
@@ -155,22 +155,25 @@ def webhook():
             current_price = data.get('close', 0)
             
             # Convert data formats
-            candles_5m_list = convert_to_candles_list(market_data[symbol]['5M'])
-            candles_4h_list = convert_to_candles_list(market_data[symbol]['4H'])
+            candles_list = convert_to_candles_list(market_data[symbol]['5M'])
             
-            # Use analyze() method instead of generate_signal() for correct formatting
-            signal = strategy.analyze(
-                candles_5m=candles_5m_list,
-                candles_htf=candles_4h_list
-            )
+            # Use new flexible strategy with 3 setup options
+            signal = strategy.analyze(candles_list, symbol=symbol)
             
             if signal:
+                setup_name = signal.get('setup_type', 'UNKNOWN')
+                confirmations = signal.get('confirmations', [])
+                risk_pct = signal.get('risk_percentage', 0) * 100
+                
                 logger.info(f"\n🎯 SIGNAL DETECTED FOR {symbol}!")
+                logger.info(f"   Setup: {setup_name}")
+                logger.info(f"   Confirmations: {', '.join(confirmations)} ({len(confirmations)}/3)")
                 logger.info(f"   Type: {signal.get('direction', 'UNKNOWN')}")
                 logger.info(f"   Entry: {signal.get('entry_price', 0):.5f}")
                 logger.info(f"   Stop Loss: {signal.get('stop_loss', 0):.5f}")
                 logger.info(f"   Take Profit: {signal.get('take_profit', 0):.5f}")
                 logger.info(f"   Risk/Reward: 1:{signal.get('risk_reward', 0):.2f}")
+                logger.info(f"   Risk Size: {risk_pct:.1f}% (Full={len(confirmations)>=3})")
                 logger.info(f"   Confidence: {signal.get('confidence', 0):.2f}")
                 
                 # Normalize signal structure for frontend
@@ -253,13 +256,9 @@ def get_signals():
                 len(data_5m.get('close', [])) >= 50):
                 
                 # Convert data formats
-                candles_5m_list = convert_to_candles_list(data_5m)
-                candles_4h_list = convert_to_candles_list(data_4h)
+                candles_list = convert_to_candles_list(data_5m)
                 
-                signal = strategy.analyze(
-                    candles_5m=candles_5m_list,
-                    candles_htf=candles_4h_list
-                )
+                signal = strategy.analyze(candles_list, symbol=symbol)
                 
                 if signal:
                     # Normalize keys for frontend

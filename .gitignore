@@ -19,13 +19,24 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
-
-# Virtual environments
 venv/
-env/
 ENV/
-.venv
+env/
+
+# Logs
+logs/*.log
+*.log
+
+# Data files
+data/*.db
+data/*.csv
+data/*.json
+databases/*.db
+
+# Config with secrets
+config/config.json
+.env
+*.env
 
 # IDE
 .vscode/
@@ -33,36 +44,13 @@ ENV/
 *.swp
 *.swo
 *~
+
+# OS
 .DS_Store
+Thumbs.db
 
-# Credentials and sensitive data
-config/credentials/
-.env
-*.key
-*.pem
-mykeys/
+# Docker
+.dockerignore
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Logs
-logs/
-*.log
-
-# Data
-data/
-results/
-cache/
-
-# Testing
-.coverage
-.pytest_cache/
-htmlcov/
-
-# Node (frontend)
-node_modules/
-npm-debug.log
-yarn-error.log
-dist/
+# Test files
+test_webhook_*.py

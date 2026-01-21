@@ -1,242 +1,316 @@
-# Forex Trading Bot - SMC Strategy
+# Forex Trading Bot - ICT/SMC Strategy
 
-Pure forex trading bot implementing Smart Money Concepts (SMC) methodology with **live MT5 trading integration**. Built with modular architecture for backtesting, paper trading, and live deployment.
+A professional forex trading bot implementing **Inner Circle Trader (ICT)** and **Smart Money Concepts (SMC)** strategies with flexible confluence requirements.
 
-## Quick Start - Live Trading
+## 🎯 Features
+
+- **3 Flexible Setup Options** for different market conditions
+- **Risk-Adaptive Position Sizing** (full/half based on confirmations)
+- **Real-time Market Analysis** via yfinance data feeds
+- **Pair-Specific Strategies** optimized for EUR/USD, GBP/USD, and XAU/USD
+- **Session-Aware Trading** (London & NY sessions)
+- **Web Dashboard** for monitoring signals and performance
+- **Comprehensive Logging** for trade analysis
+
+## 📁 Project Structure
+
+```
+forex_trading_bot/
+├── core/                               # Core trading strategies
+│   ├── flexible_ict_strategy.py       # Main flexible 3-option strategy ⭐
+│   ├── professional_strategy.py       # Original professional strategy
+│   ├── enhanced_smc_strategy.py       # Enhanced SMC implementation
+│   ├── smc_strategy.py                # Base SMC strategy
+│   ├── ict_analysis.py                # ICT pattern detection
+│   ├── advanced_filters.py            # Market filters & session detection
+│   ├── enhanced_risk_manager.py       # Position sizing & risk management
+│   ├── risk_manager.py                # Base risk manager
+│   ├── trade_executor.py              # Trade execution logic
+│   └── fibonacci_liquidity.py         # Fibonacci & liquidity tools
+│
+├── scripts/                            # Executable scripts
+│   ├── tradingview_webhook_server.py  # Main webhook server ⭐
+│   ├── live_data_poller.py            # Real-time data fetcher ⭐
+│   ├── trading_bot.py                 # Legacy trading bot
+│   └── live_trading_bot.py            # Live trading implementation
+│
+├── connectors/                         # Data connectors
+│   ├── forex_api.py                   # Forex API connector
+│   ├── free_data_connector.py         # Free data sources
+│   ├── mt5_connector.py               # MetaTrader 5 connector
+│   └── price_feed.py                  # Price feed manager
+│
+├── database/                           # Database modules
+│   ├── journal.py                     # Trade journal
+│   ├── trades.py                      # Trade records
+│   └── timeseries.py                  # Time series data
+│
+├── backtesting/                        # Backtesting engine
+│   ├── backtest_engine.py             # Main backtesting engine
+│   └── data_fetcher.py                # Historical data fetcher
+│
+├── machine_learning/                   # ML features (future)
+│   ├── feature_engineering.py         # Feature extraction
+│   └── models/                        # ML models
+│
+├── utils/                              # Utility modules
+│   ├── logger.py                      # Logging configuration
+│   ├── config.py                      # Configuration loader
+│   └── env_config.py                  # Environment config
+│
+├── tests/                              # Test suite
+│   └── test_mt5_connection.py         # MT5 connection tests
+│
+├── docs/                               # Documentation
+│   ├── TRADING_PLAN.md                # Original trading plan
+│   ├── DOCKER_SETUP.md                # Docker deployment guide
+│   ├── MT5_SETUP.md                   # MetaTrader 5 setup
+│   ├── TRADINGVIEW_WEBHOOK_SETUP.md   # TradingView integration
+│   └── ALTERNATIVE_BROKERS.md         # Broker alternatives
+│
+├── static/                             # Web dashboard
+│   └── dashboard.html                 # Real-time dashboard UI
+│
+├── config/                             # Configuration files
+│   └── config.json                    # Bot configuration
+│
+├── logs/                               # Log files (gitignored)
+├── data/                               # Data storage (gitignored)
+├── backtests/                          # Backtest scripts & results
+│
+├── start_bot.sh                        # Start the trading bot ⭐
+├── stop_bot.sh                         # Stop the trading bot ⭐
+├── requirements.txt                    # Python dependencies
+├── docker-compose.yml                  # Docker configuration
+├── Dockerfile                          # Docker image
+├── FLEXIBLE_STRATEGY_GUIDE.md          # Strategy guide (NEW!) ⭐
+├── ENHANCED_STRATEGY.md                # Enhanced strategy docs
+└── README.md                           # This file
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- pip or conda
+- Linux/macOS (Windows via WSL)
+
+### Installation
 
 ```bash
-# 1. Set up MT5 account credentials
-# See: docs/MT5_SETUP.md
+# Clone the repository
+git clone https://github.com/KirstonKK/forex_trading_bot.git
+cd forex_trading_bot
 
-# 2. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# 3. Test connection
-python3 tests/test_mt5_connection.py
-
-# 4. Run live bot (paper trading)
-python3 scripts/live_trading_bot.py
+# Start the bot
+bash start_bot.sh
 ```
 
-## Architecture
+### Endpoints
 
+Once running, access:
+
+- **Dashboard:** http://localhost:5000
+- **Health Check:** http://localhost:5000/health
+- **Signals:** http://localhost:5000/signals
+- **Market Data:** http://localhost:5000/data
+
+## 🎓 Trading Strategy
+
+The bot implements a **flexible 3-option strategy system**:
+
+### Option 1: HTF Bias + Liquidity Sweep + BoS
+- ✅ Clear HTF trend (4H or 1H)
+- ✅ Liquidity sweep (equal highs/lows or Asian range)
+- ✅ Break of Structure in HTF direction
+- **Best for:** EUR/USD, GBP/USD London session
+
+### Option 2: HTF Zone + OB + ChoCH
+- ✅ Price taps HTF zone (4H/1H)
+- ✅ Order Block on 5M aligned with zone
+- ✅ Change of Character on LTF
+- **Best for:** NY session reversals, Gold
+
+### Option 3: OB + FVG + Fib 79%
+- ✅ 5M Order Block
+- ✅ Fair Value Gap overlapping OB
+- ✅ 79% Fibonacci retracement
+- **Best for:** Clean pullbacks, precision entries
+
+### Risk Management
+
+- **3 confirmations** → 1.0% risk (full position)
+- **2 confirmations** → 0.5% risk (half position)
+- **1 confirmation** → No trade
+
+### Target Risk/Reward
+- Minimum: 1:2.5
+- Target: 1:3 to 1:5
+- Stop Loss: 30-150 pips
+
+## 📊 Supported Pairs
+
+- **EUR/USD** - Priority: Liquidity sweeps + BoS
+- **GBP/USD** - Priority: Asian range sweeps
+- **XAU/USD (Gold)** - Priority: HTF zones + trend
+
+## 🔧 Configuration
+
+Edit `config/config.json` to customize:
+
+```json
+{
+  "account_balance": 10000,
+  "risk_per_trade": 0.01,
+  "max_trades_per_day": 2,
+  "symbols": ["EURUSD", "GBPUSD"],
+  "sessions": ["london", "newyork"]
+}
 ```
-core/
-  ├── smc_strategy.py           # SMC pattern: BOS, pullback, entry zones
-  ├── enhanced_risk_manager.py  # Risk rules: 1% per trade, daily/weekly limits
-  └── trade_executor.py         # Trade lifecycle management
 
-connectors/
-  ├── mt5_connector.py          # MT5 API for live data + execution
-  ├── forex_api.py              # Generic broker interface
-  └── price_feed.py             # Real-time price feeds
+## 📈 Monitoring
 
-database/
-  ├── journal.py                # Trade journal with SMC patterns
-  ├── timeseries.py             # InfluxDB time series
-  └── trades.py                 # Trade history
-
-backtesting/
-  ├── backtest_engine.py        # Full backtest engine
-  └── data_fetcher.py           # Historical data + synthetic generation
-
-machine_learning/
-  ├── feature_engineering.py    # Trade feature extraction
-  └── models/
-      ├── trade_predictor.py    # LightGBM outcome prediction
-      └── lstm_price_predictor.py # LSTM price forecasting
-
-scripts/
-  ├── live_trading_bot.py       # Main live trading bot
-  └── trading_bot.py            # Demo/testing orchestrator
-
-tests/
-  └── test_mt5_connection.py    # MT5 setup validation
-
-docs/
-  ├── DOCKER_SETUP.md           # Docker development guide
-  ├── DOCKER_README.md          # Quick Docker start
-  └── MT5_SETUP.md              # MT5 configuration guide
+### View Signals
+```bash
+curl -s http://localhost:5000/signals | python3 -m json.tool
 ```
 
-## Core Strategy: Smart Money Concepts (SMC)
+### Watch Logs
+```bash
+# Webhook server
+tail -f logs/webhook.log
 
-**Pattern**: BOS → Pullback → Entry at High-Probability Zones
+# Data poller
+tail -f logs/poller_startup.log
+```
 
-- **BOS (Break of Structure)**: Price breaks above previous high or below previous low
-- **Pullback Zone**: Retracement after BOS before continuation
-- **Entry Zones**:
-  - **FVG** (Fair Value Gap): Unfilled price imbalances
-  - **Discount Zone**: Retracement 25-75% of move
-  - **Order Blocks**: Institutional reversal levels
+### Check System Health
+```bash
+curl http://localhost:5000/health
+```
 
-**Risk Management Rules**:
-
-- Risk per trade: **1%** of account ($100 on $10k)
-- Daily loss limit: **1.5%** ($150 on $10k)
-- Weekly loss limit: **3%** ($300 on $10k)
-- RR minimum: **1.5:1** (profit target 2.0x risk)
-- Max trades/day: **2**
-- Sessions: London (08:00-17:00 UTC) + NY (13:00-22:00 UTC)
-
-## Features
-
-✅ **Live Trading via MT5**
-
-- Real-time candlestick data
-- Market order execution
-- Automated stop loss + take profit
-- Paper trading (risk-free testing)
-
-✅ **Comprehensive Backtesting**
-
-- 100+ trades per backtest
-- Realistic synthetic data generation
-- Complete P&L analysis and drawdown metrics
-- Trade journal logging with SMC patterns
-
-✅ **Machine Learning**
-
-- LightGBM: Trade outcome prediction
-- LSTM: Price sequence forecasting
-- Feature engineering from trades
-
-✅ **Trade Journal**
-
-- SQLite persistence
-- Pattern tracking (BOS strength, pullback confidence)
-- Daily/weekly statistics
-- Export capabilities
-
-## Usage
-
-### Live Trading (Paper)
+## 🐳 Docker Deployment
 
 ```bash
-# 1. Set environment variables with MT5 credentials
-export MT5_LOGIN=your_login
-export MT5_PASSWORD=your_password
-export MT5_SERVER=your_server_name
+# Build and run with Docker
+docker-compose up -d
 
-# Or create a .env file
-cat > .env << EOF
-MT5_LOGIN=your_login
-MT5_PASSWORD=your_password
-MT5_SERVER=your_server_name
-EOF
+# View logs
+docker-compose logs -f
 
-# 2. Run bot
-python3 scripts/live_trading_bot.py
+# Stop
+docker-compose down
 ```
 
-### Backtesting
+## 📚 Documentation
+
+- **[Flexible Strategy Guide](FLEXIBLE_STRATEGY_GUIDE.md)** - Detailed strategy explanation ⭐
+- **[Trading Plan](docs/TRADING_PLAN.md)** - Original ICT trading plan
+- **[Docker Setup](docs/DOCKER_SETUP.md)** - Deployment guide
+- **[TradingView Integration](docs/TRADINGVIEW_WEBHOOK_SETUP.md)** - Webhook setup
+
+## 🧪 Testing
 
 ```bash
-# Quick sample data backtest (200 days)
-cd backtests/scripts
-python3 run_quick_backtest.py
+# Run unit tests
+python -m pytest tests/
 
-# Realistic live data backtest (2 weeks)
-python3 backtest_realistic_live.py
+# Test webhook server
+python test_webhook_simple.py
 
-# Custom backtest with parameters
-python3 backtest_runner.py --symbols EURUSD GBPUSD --days 100
+# Test data connection
+python tests/test_mt5_connection.py
 ```
 
-### Testing
+## 📊 Backtesting
 
 ```bash
-# Test MT5 API connection
-python3 tests/test_mt5_connection.py
+# Run backtest
+python backtests/scripts/backtest_real_data_2024.py
 
-# Test strategy on live prices (demo)
-python3 scripts/trading_bot.py
+# View results
+cat backtests/results/latest_backtest.json
 ```
 
-## Database
+## ⚠️ Disclaimer
 
-- **SQLite**: Trade history, journal, performance metrics
-- **InfluxDB** (optional): Time series candlestick + indicator data
-- **Files**: backtests/results/ for test artifacts
+**This bot is for educational purposes only.** Trading forex and CFDs involves substantial risk of loss. Past performance is not indicative of future results. Always:
 
-## Configuration
+- Start with a demo account
+- Never risk more than you can afford to lose
+- Understand the strategy before going live
+- Monitor the bot regularly
+- Use proper risk management
 
-See `config/config.json` for default settings:
+## 📝 License
 
-- Account size: $10,000
-- Risk per trade: 1%
-- Trading pairs: EURUSD, GBPUSD, XAUUSD
-- Symbols and timeframes
+This project is licensed under the MIT License - see LICENSE file for details.
 
-## Performance
+## 🤝 Contributing
 
-**Backtest Results** (200-day sample data):
+Contributions are welcome! Please:
 
-- Trades: 1,151
-- Win Rate: 89.8%
-- Return: ~1500%+ (note: synthetic data unrealistic)
-- Max Drawdown: 32.88%
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Open a Pull Request
 
-⚠️ _Synthetic data results not realistic - live trading required for validation_
+## 📧 Support
 
-**Live Paper Trading** (recommended):
+- **Issues:** Open an issue on GitHub
+- **Discussions:** Use GitHub Discussions
+- **Documentation:** Check the `docs/` folder
 
-- Run 24-48 hours first
-- Verify signals match strategy rules
-- Check journal in `data/live_journal.db`
-- Monitor trades in MT5 terminal
+## 🔄 Recent Updates
 
-## Files
+### v2.0.0 - Flexible Strategy Implementation (Jan 2026)
+- ✨ Added 3-option flexible strategy system
+- ✨ Implemented confirmation-based risk sizing
+- ✨ Added pair-specific strategy priorities
+- ✨ Enhanced logging with setup type details
+- 📚 Created comprehensive strategy guide
+- 🐛 Fixed strategy integration issues
 
-| File                           | Purpose                             |
-| ------------------------------ | ----------------------------------- |
-| `docs/MT5_SETUP.md`            | Step-by-step MT5 account setup      |
-| `scripts/live_trading_bot.py`  | Main live trading entry point       |
-| `tests/test_mt5_connection.py` | Validate MT5 setup before trading   |
-| `docs/DOCKER_SETUP.md`         | Docker development environment      |
-| `backtests/README.md`          | Backtesting documentation           |
-| `data/`                        | Trade journals and backtest results |
+### v1.0.0 - Initial Release
+- ⚡ Professional ICT/SMC strategy
+- 📊 Real-time data via yfinance
+- 🌐 Web dashboard
+- 📝 Comprehensive logging
+- 🐳 Docker support
 
-## Requirements
+## 🛠️ Maintenance
 
-- Python 3.9+
-- requests (Oanda API)
-- numpy, pandas (analysis)
-- tensorflow, lightgbm (ML models)
-- sqlite3 (trades database)
+### Update Dependencies
+```bash
+pip install -r requirements.txt --upgrade
+```
 
-## Next Steps
+### Clean Logs
+```bash
+# Keep last 7 days only
+find logs/ -name "*.log" -mtime +7 -delete
+```
 
-1. ✓ Create MT5 account with credentials (already have)
-2. ✓ Set up environment variables (see docs/MT5_SETUP.md)
-3. ✓ Run `tests/test_mt5_connection.py` (validate)
-4. ✓ Start `scripts/live_trading_bot.py` (paper trading)
-5. ✓ Monitor in MT5 terminal
-6. ✓ Review trade journal daily
-7. Once profitable: Switch to live (change credentials)
+### Backup Data
+```bash
+# Backup database and logs
+tar -czf backup_$(date +%Y%m%d).tar.gz data/ logs/
+```
 
-## Important Notes
+## 🎯 Roadmap
 
-⚠️ **Always test with paper trading first**
+- [ ] Machine learning signal filtering
+- [ ] Multi-timeframe analysis dashboard
+- [ ] Telegram notifications
+- [ ] Advanced backtesting reports
+- [ ] Paper trading mode
+- [ ] Risk analyzer tools
 
-- No real money at risk
-- Exact same execution and spreads
-- Simulated balance
+---
 
-⚠️ **Strategy disclaimer**
-
-- Back tested results may not reflect live performance
-- Past performance ≠ future results
-- Market conditions vary
-- Use strict risk management
-
-⚠️ **Rate limits**
-
-- Oanda: ~120 requests/min
-- Bot respects limits with 5-min polling interval
-
-## Support
-
-- **MT5 API**: https://www.mql5.com/en/articles/6157
-- **Python Library**: https://github.com/khramkov/MT5-Python
-- **Strategy Help**: SMC (Smart Money Concepts) educational resources
+**Made with ❤️ for ICT traders**
