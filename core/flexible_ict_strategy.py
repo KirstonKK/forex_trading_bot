@@ -97,7 +97,7 @@ class FlexibleICTStrategy:
     
     def __init__(self):
         self.filters = AdvancedFilters()
-        self.trades_today = 0
+        self.trades_today = {}  # Track per symbol: {'EURUSD': 1, 'GBPUSD': 0}
         self._last_rejection_reasons = []  # Track why signals were rejected
         self._last_sweep_found = False  # Track if sweep was detected
         self._last_bos_found = False    # Track if BoS was detected
@@ -873,21 +873,29 @@ class FlexibleICTStrategy:
         risk_map = {3: 1.0, 2: 0.5}
         return risk_map.get(min(confirmation_count, 3), 0.0)
     
-    def can_take_trade(self, timestamp: int) -> bool:
-        """Check daily limits (max 1 trade/day for highest quality)."""
+    def can_take_trade(self, timestamp: int, symbol: str = 'EURUSD') -> bool:
+        """Check daily limits (max 1 trade/day per symbol for highest quality)."""
         current_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
         
+        # Reset all counters on new day
         if self.current_date != current_date:
             self.current_date = current_date
-            self.trades_today = 0
+            self.trades_today = {}  # Reset all pairs
+        
+        # Get trade count for this specific symbol
+        symbol_trades = self.trades_today.get(symbol, 0)
         
         # Only 1 trade per day per pair for highest win rate
         # The first setup of the day is usually the cleanest
-        if self.trades_today >= 1:
+        if symbol_trades >= 1:
             return False
         
         can_trade, _ = self.filters.can_trade_now(timestamp)
         return can_trade
+    
+    def record_trade(self, symbol: str):
+        """Record that a trade was taken for a symbol today."""
+        self.trades_today[symbol] = self.trades_today.get(symbol, 0) + 1
     
     def analyze(self, candles: List[dict], symbol: str = 'EURUSD', mtf_data: Dict[str, List[dict]] = None) -> Optional[Dict]:
         """
@@ -916,9 +924,15 @@ class FlexibleICTStrategy:
         if len(base_candles) < 50:
             self._last_rejection_reasons.append("Insufficient data (need 50+ candles)")
             return None
-            
-        if not self.can_take_trade(base_candles[-1]['timestamp']):
-            self._last_rejection_reasons.append("Outside trading session (10:00-17:00 UTC)")
+        
+        # Check if we already took a trade for this symbol today
+        if not self.can_take_trade(base_candles[-1]['timestamp'], symbol):
+            # Check if it's session issue or trade limit
+            can_trade, _ = self.filters.can_trade_now(base_candles[-1]['timestamp'])
+            if not can_trade:
+                self._last_rejection_reasons.append("Outside trading session (10:00-17:00 UTC)")
+            else:
+                self._last_rejection_reasons.append(f"Already traded {symbol} today (1 per day limit)")
             return None
         
         # Determine priority based on symbol
@@ -977,7 +991,8 @@ class FlexibleICTStrategy:
         
         confidence = min(confidence, 0.95)
         
-        self.trades_today += 1
+        # Record trade for this symbol (1 per day limit)
+        self.record_trade(symbol)
         
         return {
             'timestamp': candles[-1]['timestamp'],
