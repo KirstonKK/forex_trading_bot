@@ -560,12 +560,55 @@
                 <div class="stat-value" id="signalsToday">0</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Data Points</div>
-                <div class="stat-value" id="dataPoints">0</div>
+                <div class="stat-label">Win Rate</div>
+                <div class="stat-value" id="winRate">--</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Update Interval</div>
-                <div class="stat-value">10s</div>
+                <div class="stat-label">Total Pips</div>
+                <div class="stat-value" id="totalPips">--</div>
+            </div>
+        </div>
+
+        <!-- Performance Panel -->
+        <div class="performance-panel"
+            style="margin-bottom: 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">
+            <!-- Overall Performance -->
+            <div
+                style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 2px; padding: 15px;">
+                <div
+                    style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 10px;">
+                    📊 Overall Performance</div>
+                <div id="overallPerformance" style="font-size: 12px;">
+                    <div style="margin-bottom: 5px;">Trades: <span id="perfTrades">0</span></div>
+                    <div style="margin-bottom: 5px;">Wins: <span id="perfWins"
+                            style="color: var(--accent-green);">0</span> | Losses: <span id="perfLosses"
+                            style="color: var(--accent-red);">0</span></div>
+                    <div style="margin-bottom: 5px;">Profit Factor: <span id="perfProfitFactor">--</span></div>
+                    <div>Avg Win: <span id="perfAvgWin" style="color: var(--accent-green);">--</span> | Avg Loss: <span
+                            id="perfAvgLoss" style="color: var(--accent-red);">--</span></div>
+                </div>
+            </div>
+
+            <!-- Performance by Pair -->
+            <div
+                style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 2px; padding: 15px;">
+                <div
+                    style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 10px;">
+                    💱 By Pair</div>
+                <div id="pairPerformance" style="font-size: 12px;">
+                    <div style="color: var(--text-secondary);">No data yet</div>
+                </div>
+            </div>
+
+            <!-- Upcoming News -->
+            <div
+                style="background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 2px; padding: 15px;">
+                <div
+                    style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 10px;">
+                    📅 News Events</div>
+                <div id="newsEvents" style="font-size: 11px;">
+                    <div style="color: var(--text-secondary);">Loading...</div>
+                </div>
             </div>
         </div>
 
@@ -931,12 +974,93 @@
         updateSessions();
         refreshData();
         refreshSentiment();
+        refreshPerformance();
 
         // Update intervals
         setInterval(updateGMTTime, 1000);
         setInterval(updateSessions, 60000);
         setInterval(refreshData, 10000);
         setInterval(refreshSentiment, 60000); // Update sentiment every minute
+        setInterval(refreshPerformance, 30000); // Update performance every 30s
+
+        // Fetch and display performance stats
+        async function refreshPerformance() {
+            try {
+                const response = await fetch('/performance');
+                const data = await response.json();
+
+                if (data.status !== 'success') return;
+
+                // Update header stats
+                const overall = data.overall || {};
+                document.getElementById('winRate').textContent =
+                    overall.win_rate ? overall.win_rate.toFixed(1) + '%' : '--';
+                document.getElementById('totalPips').textContent =
+                    overall.total_pips ? overall.total_pips.toFixed(1) : '--';
+
+                // Update overall performance
+                document.getElementById('perfTrades').textContent = overall.total_trades || 0;
+                document.getElementById('perfWins').textContent = overall.wins || 0;
+                document.getElementById('perfLosses').textContent = overall.losses || 0;
+                document.getElementById('perfProfitFactor').textContent =
+                    overall.profit_factor ? overall.profit_factor.toFixed(2) : '--';
+                document.getElementById('perfAvgWin').textContent =
+                    overall.avg_win ? '+' + overall.avg_win.toFixed(1) + ' pips' : '--';
+                document.getElementById('perfAvgLoss').textContent =
+                    overall.avg_loss ? '-' + Math.abs(overall.avg_loss).toFixed(1) + ' pips' : '--';
+
+                // Update by pair performance
+                const pairContainer = document.getElementById('pairPerformance');
+                const byPair = data.by_pair || {};
+                if (Object.keys(byPair).length > 0) {
+                    let pairHtml = '';
+                    Object.entries(byPair).forEach(([pair, stats]) => {
+                        const wrClass = stats.win_rate >= 50 ? 'positive' : 'negative';
+                        pairHtml += `
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
+                                <span>${pair}</span>
+                                <span class="${wrClass}" style="color: ${stats.win_rate >= 50 ? 'var(--accent-green)' : 'var(--accent-red)'}">
+                                    ${stats.win_rate.toFixed(0)}% (${stats.trades})
+                                </span>
+                            </div>
+                        `;
+                    });
+                    pairContainer.innerHTML = pairHtml;
+                } else {
+                    pairContainer.innerHTML = '<div style="color: var(--text-secondary);">No trades yet</div>';
+                }
+
+                // Update news events
+                const newsContainer = document.getElementById('newsEvents');
+                const events = data.news_events || [];
+                if (data.news_blackout) {
+                    newsContainer.innerHTML = `
+                        <div style="color: var(--accent-red); font-weight: bold; margin-bottom: 8px;">
+                            🔴 NEWS BLACKOUT ACTIVE
+                        </div>
+                        <div style="font-size: 10px; color: var(--text-secondary);">
+                            ${data.news_blackout_reason || 'High-impact event'}
+                        </div>
+                    `;
+                } else if (events.length > 0) {
+                    let eventsHtml = '';
+                    events.slice(0, 5).forEach(event => {
+                        const icon = event.impact === 'HIGH' ? '🔴' : '🟡';
+                        eventsHtml += `
+                            <div style="margin-bottom: 4px;">
+                                ${icon} ${event.time_str || ''} - ${event.name} (${event.currency})
+                            </div>
+                        `;
+                    });
+                    newsContainer.innerHTML = eventsHtml;
+                } else {
+                    newsContainer.innerHTML = '<div style="color: var(--accent-green);">✅ No major news next 24h</div>';
+                }
+
+            } catch (error) {
+                console.log('Performance fetch error (non-critical):', error);
+            }
+        }
 
         // Fetch and display advisory sentiment
         async function refreshSentiment() {

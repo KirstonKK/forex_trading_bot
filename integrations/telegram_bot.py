@@ -85,6 +85,11 @@ class TelegramNotifier:
         setup = signal.get('setup_type', 'ICT Setup')
         confidence = signal.get('confidence', 0) * 100
         
+        # ML Risk info
+        ml_confidence = signal.get('ml_confidence')
+        ml_recommendation = signal.get('ml_recommendation', '')
+        ml_reasoning = signal.get('ml_reasoning', [])
+        
         # Direction emoji
         emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
         
@@ -95,6 +100,14 @@ class TelegramNotifier:
         price_note = ""
         if 'XAU' in symbol:
             price_note = "\n\n⚠️ <i>Futures price - spot ~$30-40 lower</i>"
+        
+        # ML section
+        ml_section = ""
+        if ml_confidence is not None:
+            risk_emoji = "🟢" if ml_recommendation == 'full_risk' else "🟡" if 'half' in ml_recommendation or 'quarter' in ml_recommendation else "🔴"
+            ml_section = f"\n\n🤖 <b>ML Score:</b> {ml_confidence}% {risk_emoji}\n📊 <b>Risk:</b> {ml_recommendation.replace('_', ' ').title()}"
+            if ml_reasoning:
+                ml_section += "\n" + "\n".join(ml_reasoning[:3])
         
         message = f"""
 {emoji} <b>NEW SIGNAL: {pair}</b>
@@ -107,7 +120,7 @@ class TelegramNotifier:
 🎯 <b>Take Profit:</b> <code>{tp:.5f}</code>
 
 ⚖️ <b>Risk/Reward:</b> 1:{rr:.1f}
-🎲 <b>Confidence:</b> {confidence:.0f}%{price_note}
+🎲 <b>Confidence:</b> {confidence:.0f}%{ml_section}{price_note}
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
 """

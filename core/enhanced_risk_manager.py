@@ -192,7 +192,8 @@ class EnhancedRiskManager:
         self,
         entry_price: float,
         stop_loss: float,
-        symbol: str = ""  # noqa: ARG002 - kept for API compatibility
+        symbol: str = "",  # noqa: ARG002 - kept for API compatibility
+        ml_risk_multiplier: float = 1.0  # ML-based risk adjustment
     ) -> float:
         """
         Calculate position size in DOLLARS for the trade, not units.
@@ -202,10 +203,18 @@ class EnhancedRiskManager:
         
         The backtest engine will multiply this by price moves to get P&L.
         
+        ML Risk Adjustment:
+        - 1.0 = Full risk (high ML confidence)
+        - 0.75 = 3/4 risk
+        - 0.5 = Half risk
+        - 0.25 = Quarter risk
+        - 0.0 = Skip trade (ML says avoid)
+        
         Args:
             entry_price: Entry price
             stop_loss: Stop loss price
             symbol: Trading pair
+            ml_risk_multiplier: ML-based adjustment (0.0 to 1.0)
             
         Returns:
             Dollar amount at risk for this trade
@@ -215,8 +224,11 @@ class EnhancedRiskManager:
         if risk_pips == 0:
             return 0.0
         
-        # Return the risk amount directly - this is what we're willing to lose
-        return self.risk_amount
+        # Apply ML risk adjustment
+        adjusted_risk = self.risk_amount * ml_risk_multiplier
+        
+        # Return the adjusted risk amount
+        return adjusted_risk
 
     def validate_trade(
         self,

@@ -19,6 +19,13 @@ from enum import Enum
 from datetime import datetime, timezone
 from core.advanced_filters import AdvancedFilters
 
+# Import news filter (with fallback if not available)
+try:
+    from integrations.news_filter import is_news_blackout
+except ImportError:
+    def is_news_blackout(symbol=None):
+        return (False, None)  # No blocking if module not found
+
 
 class TrendDirection(Enum):
     BULLISH = "bullish"
@@ -104,6 +111,22 @@ class FlexibleICTStrategy:
         self.current_date = None
         # Store multi-timeframe data
         self.mtf_data = {}  # {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
+        
+        # Correlation tracking - prevents opposite signals on correlated pairs
+        self._recent_signals = {}  # {'EURUSD': {'direction': 'short', 'time': timestamp}}
+        
+        # Signal cooldown - prevent duplicate/similar signals
+        self._last_signal_time = {}  # {'EURUSD': timestamp}
+        self._signal_cooldown_minutes = 30  # 30 min minimum between signals on same pair
+        
+        # Session-specific settings
+        self.session_settings = {
+            'london': {'start': 8, 'end': 12, 'min_confidence': 0.85},
+            'newyork': {'start': 13, 'end': 17, 'min_confidence': 0.90}
+        }
+        
+        # Fixed R:R - DO NOT CHANGE (60% win rate achieved with 1:2)
+        self.target_rr = 2.0  # 1:2 R:R - backtested
     
     def set_mtf_data(self, mtf_data: Dict[str, List[dict]]):
         """Set multi-timeframe data for analysis."""
@@ -114,6 +137,137 @@ class FlexibleICTStrategy:
         tf_map = {240: '4H', 60: '1H', 15: '15M', 5: '5M'}
         tf_key = tf_map.get(timeframe, '4H')
         return self.mtf_data.get(tf_key, [])
+    
+    def check_correlation_conflict(self, symbol: str, direction: str, timestamp: int) -> bool:
+        """
+        Check if there's a conflicting signal on a correlated pair.
+        EU and GBP are highly correlated - opposite signals = one is wrong.
+        Returns True if conflict exists (should reject).
+        """
+        correlated_pairs = {
+            'EURUSD': ['GBPUSD'],
+            'GBPUSD': ['EURUSD']
+        }
+        
+        related = correlated_pairs.get(symbol, [])
+        current_hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
+        
+        for related_symbol in related:
+            if related_symbol in self._recent_signals:
+                sig = self._recent_signals[related_symbol]
+                sig_hour = datetime.fromisoformat(sig['time']).hour
+                
+                # If signal within same hour and opposite direction
+                if sig_hour == current_hour and sig['direction'] != direction:
+                    return True
+        
+        return False
+    
+    def record_signal_direction(self, symbol: str, direction: str, timestamp: int = None):
+        """Record signal direction for correlation checking and cooldown."""
+        self._recent_signals[symbol] = {
+            'direction': direction,
+            'time': datetime.now(timezone.utc).isoformat()
+        }
+        # Record signal time for cooldown
+        self._last_signal_time[symbol] = timestamp or int(datetime.now(timezone.utc).timestamp())
+    
+    def check_signal_cooldown(self, symbol: str, timestamp: int) -> bool:
+        """
+        Check if enough time has passed since last signal on this pair.
+        Prevents duplicate/similar signals within cooldown period.
+        
+        Returns True if we can signal, False if in cooldown.
+        """
+        last_time = self._last_signal_time.get(symbol)
+        if last_time is None:
+            return True
+        
+        minutes_elapsed = (timestamp - last_time) / 60
+        if minutes_elapsed < self._signal_cooldown_minutes:
+            return False
+        
+        return True
+    
+    def check_5m_entry_trigger(self, candles: List[dict], direction: str) -> bool:
+        """
+        Wait for 5M micro-structure confirmation before entering.
+        
+        For LONG: Need 5M ChoCH (lower low followed by higher high)
+        For SHORT: Need 5M ChoCH (higher high followed by lower low)
+        
+        This prevents entering too early before the move starts.
+        """
+        if len(candles) < 10:
+            return False
+        
+        recent = candles[-10:]  # Last 10 5M candles (50 mins)
+        
+        if direction == 'long':
+            # For longs: Look for bullish ChoCH
+            # Price made a lower low, then broke above a previous high
+            lows = [c['low'] for c in recent]
+            highs = [c['high'] for c in recent]
+            
+            # Find the lowest point
+            lowest_idx = lows.index(min(lows))
+            
+            # After lowest point, did we break a previous high?
+            if lowest_idx < len(recent) - 2:  # Need at least 2 candles after
+                pre_low_high = max(highs[:lowest_idx]) if lowest_idx > 0 else highs[0]
+                post_low_high = max(highs[lowest_idx:])
+                
+                # Current price should be above the high before the sweep
+                if post_low_high > pre_low_high and recent[-1]['close'] > pre_low_high:
+                    return True
+            return False
+        
+        else:  # SHORT
+            # For shorts: Look for bearish ChoCH
+            # Price made a higher high, then broke below a previous low
+            lows = [c['low'] for c in recent]
+            highs = [c['high'] for c in recent]
+            
+            # Find the highest point
+            highest_idx = highs.index(max(highs))
+            
+            # After highest point, did we break a previous low?
+            if highest_idx < len(recent) - 2:  # Need at least 2 candles after
+                pre_high_low = min(lows[:highest_idx]) if highest_idx > 0 else lows[0]
+                post_high_low = min(lows[highest_idx:])
+                
+                # Current price should be below the low before the sweep
+                if post_high_low < pre_high_low and recent[-1]['close'] < pre_high_low:
+                    return True
+            return False
+    
+    def get_session_type(self, timestamp: int) -> str:
+        """Determine current trading session."""
+        hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
+        if 8 <= hour < 12:
+            return 'london'
+        elif 13 <= hour < 17:
+            return 'newyork'
+        return 'other'
+    
+    def check_15m_confirmation(self, direction: str) -> bool:
+        """
+        Verify 15M timeframe confirms the trade direction.
+        Requires 15M structure to show same bias as 5M entry.
+        """
+        candles_15m = self.get_htf_candles(15)
+        if len(candles_15m) < 20:
+            return True  # Not enough data, allow trade
+        
+        # Check 15M trend
+        trend_15m = self.determine_htf_trend(candles_15m, 15)
+        
+        if direction == 'long' and trend_15m == TrendDirection.BEARISH:
+            return False
+        if direction == 'short' and trend_15m == TrendDirection.BULLISH:
+            return False
+        
+        return True
     
     def determine_htf_trend(self, candles: List[dict], timeframe: int = 240) -> TrendDirection:
         """Determine HTF trend (4H or 1H) using actual HTF data."""
@@ -546,10 +700,12 @@ class FlexibleICTStrategy:
         
         confirmations.append("BOS")
         
-        # 4. ChoCH confirmation for extra confirmation (higher win rate)
+        # 4. ChoCH confirmation - NOW REQUIRED for higher win rate
         has_choch = self.check_choch(candles, direction)
-        if has_choch:
-            confirmations.append("CHOCH")
+        if not has_choch:
+            self._last_rejection_reasons.append("No ChoCH confirmation (momentum shift required)")
+            return None
+        confirmations.append("CHOCH")
         
         # 5. Price must be at FRESH FVG or OB for entry (not stale zones)
         current_price = candles[-1]['close']
@@ -790,18 +946,21 @@ class FlexibleICTStrategy:
         
         For SHORT: Find the recent swing high that was swept
         For LONG: Find the recent swing low that was swept
+        
+        Use TIGHTER structure (last 20 candles = ~100 min) for better SL placement.
         """
-        if len(candles) < 30:
+        if len(candles) < 20:
             return None
-            
-        recent = candles[-40:] if len(candles) >= 40 else candles
+        
+        # Use tighter recent range for better SL (20 candles = ~1.5 hours)
+        recent = candles[-20:] if len(candles) >= 20 else candles
         
         if direction == 'short':
-            # Find the highest swing high in recent candles
+            # Find the highest swing high in recent candles (exclude last 3)
             swing_high = max(c['high'] for c in recent[:-3])
             return swing_high
         else:
-            # Find the lowest swing low in recent candles
+            # Find the lowest swing low in recent candles (exclude last 3)
             swing_low = min(c['low'] for c in recent[:-3])
             return swing_low
     
@@ -844,10 +1003,26 @@ class FlexibleICTStrategy:
         point_value = 0.00001
         sl_points = sl_distance / point_value
         
-        # Validate SL range: Allow 50-500 points (5-50 pips)
-        # Wider range to accommodate proper SL placement beyond liquidity zones
-        if sl_points < 50 or sl_points > 500:
-            return None, None, 0
+        # Max SL limits by pair (in points, 10 points = 1 pip)
+        # EUR/USD, GBP/USD: 25 pips max = 250 points
+        # XAUUSD uses different calculation
+        max_sl_points = 250  # 25 pips max for forex
+        min_sl_points = 80   # 8 pips min (too tight = noise)
+        
+        # Validate SL range
+        if sl_points < min_sl_points:
+            return None, None, 0  # Too tight
+        
+        # If SL is too big, cap it to max allowed
+        if sl_points > max_sl_points:
+            # Recalculate stop_loss with max distance
+            max_sl_distance = max_sl_points * point_value
+            if direction == 'long':
+                stop_loss = entry - max_sl_distance
+            else:
+                stop_loss = entry + max_sl_distance
+            sl_distance = max_sl_distance
+            sl_points = max_sl_points
         
         # Calculate TP with 1:2 RR - better win rate
         # 1:2 RR requires 33% win rate to break even
@@ -890,8 +1065,8 @@ class FlexibleICTStrategy:
         if symbol_trades >= 1:
             return False
         
-        can_trade, _ = self.filters.can_trade_now(timestamp)
-        return can_trade
+        # Session check is now done at the top of analyze()
+        return True
     
     def record_trade(self, symbol: str):
         """Record that a trade was taken for a symbol today."""
@@ -925,14 +1100,31 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Insufficient data (need 50+ candles)")
             return None
         
+        # Use CURRENT time for session checks, not candle timestamp
+        # This ensures we check against actual current time, not delayed data
+        current_timestamp = int(datetime.now(timezone.utc).timestamp())
+        candle_timestamp = base_candles[-1]['timestamp']
+        
+        # ===== SESSION CHECK FIRST - Must be in trading hours =====
+        can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
+        if not can_trade:
+            self._last_rejection_reasons.append(f"Outside trading session: {session_reason}")
+            return None
+        
+        # ===== SIGNAL COOLDOWN - Prevent duplicate signals =====
+        if not self.check_signal_cooldown(symbol, current_timestamp):
+            self._last_rejection_reasons.append(f"Signal cooldown ({self._signal_cooldown_minutes}min between signals)")
+            return None
+        
+        # ===== NEWS FILTER - Check for high-impact events =====
+        is_blackout, news_reason = is_news_blackout(symbol)
+        if is_blackout:
+            self._last_rejection_reasons.append(news_reason)
+            return None
+        
         # Check if we already took a trade for this symbol today
-        if not self.can_take_trade(base_candles[-1]['timestamp'], symbol):
-            # Check if it's session issue or trade limit
-            can_trade, _ = self.filters.can_trade_now(base_candles[-1]['timestamp'])
-            if not can_trade:
-                self._last_rejection_reasons.append("Outside trading session (10:00-17:00 UTC)")
-            else:
-                self._last_rejection_reasons.append(f"Already traded {symbol} today (1 per day limit)")
+        if not self.can_take_trade(current_timestamp, symbol):
+            self._last_rejection_reasons.append(f"Already traded {symbol} today (1 per day limit)")
             return None
         
         # Determine priority based on symbol
@@ -954,6 +1146,29 @@ class FlexibleICTStrategy:
             if not self._last_rejection_reasons:
                 self._last_rejection_reasons.append("No valid ICT setup pattern")
             return None
+        
+        direction = setup_data['direction']
+        
+        # ===== NEW FILTERS =====
+        
+        # 1. Correlation Filter - prevent opposite signals on EU/GBP
+        if self.check_correlation_conflict(symbol, direction, current_timestamp):
+            self._last_rejection_reasons.append(f"Correlation conflict (opposite signal on related pair)")
+            return None
+        
+        # 2. 15M Confirmation - ensure 15M structure agrees
+        if not self.check_15m_confirmation(direction):
+            self._last_rejection_reasons.append("15M structure conflicts with trade direction")
+            return None
+        
+        # 3. 5M Entry Trigger - wait for 5M ChoCH before entry
+        if not self.check_5m_entry_trigger(base_candles, direction):
+            self._last_rejection_reasons.append("No 5M ChoCH confirmation yet (wait for LTF entry)")
+            return None
+        
+        # 4. Session-specific confidence threshold
+        session = self.get_session_type(current_timestamp)
+        min_confidence = self.session_settings.get(session, {}).get('min_confidence', 0.85)
         
         # Check confirmation count
         confirmation_count = len(setup_data['confirmations'])
@@ -994,8 +1209,11 @@ class FlexibleICTStrategy:
         # Record trade for this symbol (1 per day limit)
         self.record_trade(symbol)
         
+        # Record signal time for cooldown tracking
+        self._last_signal_time[symbol] = current_timestamp
+        
         return {
-            'timestamp': candles[-1]['timestamp'],
+            'timestamp': current_timestamp,
             'symbol': symbol,
             'setup_type': setup_data['setup_type'].value,
             'direction': setup_data['direction'],

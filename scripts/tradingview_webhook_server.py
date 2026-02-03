@@ -49,6 +49,48 @@ except ImportError:
     REPORT_TRACKER_AVAILABLE = False
     get_report_tracker = None
 
+# Import Trade Performance Tracker
+try:
+    from integrations.trade_tracker import get_trade_tracker
+    TRADE_TRACKER_AVAILABLE = True
+except ImportError:
+    TRADE_TRACKER_AVAILABLE = False
+    get_trade_tracker = None
+
+# Import News Filter for upcoming events
+try:
+    from integrations.news_filter import get_news_filter
+    NEWS_FILTER_AVAILABLE = True
+except ImportError:
+    NEWS_FILTER_AVAILABLE = False
+    get_news_filter = None
+
+# Import Weekly Reporter
+try:
+    from integrations.weekly_report import get_weekly_reporter, should_send_weekly_report
+    WEEKLY_REPORTER_AVAILABLE = True
+except ImportError:
+    WEEKLY_REPORTER_AVAILABLE = False
+    get_weekly_reporter = None
+    should_send_weekly_report = None
+
+# Import A/B Testing Framework
+try:
+    from integrations.ab_testing import get_ab_framework
+    AB_TESTING_AVAILABLE = True
+except ImportError:
+    AB_TESTING_AVAILABLE = False
+    get_ab_framework = None
+
+# Import ML Risk Model
+try:
+    from machine_learning.ml_risk_model import get_ml_risk_model, score_signal as ml_score_signal
+    ML_RISK_AVAILABLE = True
+except ImportError:
+    ML_RISK_AVAILABLE = False
+    get_ml_risk_model = None
+    ml_score_signal = None
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -371,6 +413,40 @@ def webhook():
                 confirmations = signal.get('confirmations', [])
                 risk_pct = signal.get('risk_percentage', 0) * 100
                 
+                # === ML RISK SCORING ===
+                ml_score = None
+                if ML_RISK_AVAILABLE and ml_score_signal:
+                    try:
+                        # Build market context for ML
+                        market_context = {
+                            'session': 'LONDON' if 10 <= datetime.utcnow().hour < 14 else 'NY' if 14 <= datetime.utcnow().hour < 17 else 'OFF',
+                            'atr': 1.0,  # Would calculate from candles
+                            'avg_atr': 1.0,
+                            'trend_strength': 0.5,  # Would calculate from HTF
+                            'historical': {
+                                'pair_win_rate': 0.6,
+                                'hour_win_rate': 0.6,
+                                'setup_win_rate': 0.6,
+                                'streak': 0
+                            }
+                        }
+                        ml_score = ml_score_signal(signal, market_context)
+                        
+                        # Add ML info to signal
+                        signal['ml_confidence'] = ml_score.get('confidence', 70)
+                        signal['ml_risk_multiplier'] = ml_score.get('risk_multiplier', 1.0)
+                        signal['ml_recommendation'] = ml_score.get('recommendation', 'full_risk')
+                        signal['ml_reasoning'] = ml_score.get('reasoning', [])
+                        
+                        # Adjust risk based on ML score
+                        adjusted_risk = risk_pct * ml_score.get('risk_multiplier', 1.0)
+                        signal['adjusted_risk_pct'] = adjusted_risk
+                        
+                        logger.info(f"   🤖 ML Score: {ml_score.get('confidence', 0)}% → {ml_score.get('recommendation', 'N/A')}")
+                        
+                    except Exception as e:
+                        logger.error(f"ML scoring error: {e}")
+                
                 logger.info(f"\n🎯 SIGNAL DETECTED FOR {symbol}!")
                 logger.info(f"   Setup: {setup_name}")
                 logger.info(f"   Confirmations: {', '.join(confirmations)} ({len(confirmations)}/3)")
@@ -607,6 +683,191 @@ def get_daily_report():
     })
 
 
+@app.route('/performance', methods=['GET'])
+def get_performance():
+    """Get trade performance statistics for dashboard."""
+    result = {
+        'status': 'success',
+        'overall': {},
+        'by_pair': {},
+        'by_session': {},
+        'recent_trades': [],
+        'equity_curve': [],
+        'news_events': []
+    }
+    
+    # Trade tracker stats
+    if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+        try:
+            tracker = get_trade_tracker()
+            stats = tracker.get_performance_stats()
+            result['overall'] = stats.get('overall', {})
+            result['by_pair'] = stats.get('by_pair', {})
+            result['recent_trades'] = stats.get('recent_trades', [])
+            result['equity_curve'] = stats.get('equity_curve', [])
+        except Exception as e:
+            logger.error(f"Trade tracker error: {e}")
+            result['overall'] = {'error': str(e)}
+    else:
+        result['overall'] = {
+            'total_trades': 0,
+            'wins': 0,
+            'losses': 0,
+            'win_rate': 0.0,
+            'total_pips': 0.0,
+            'message': 'Trade tracker not configured'
+        }
+    
+    # News events
+    if NEWS_FILTER_AVAILABLE and get_news_filter:
+        try:
+            nf = get_news_filter()
+            result['news_events'] = nf.get_upcoming_events(24)
+            is_blackout, reason = nf.is_news_blackout()
+            result['news_blackout'] = is_blackout
+            result['news_blackout_reason'] = reason
+        except Exception as e:
+            logger.error(f"News filter error: {e}")
+            result['news_events'] = []
+    
+    return jsonify(result)
+
+
+@app.route('/report/weekly', methods=['GET', 'POST'])
+def get_weekly_report():
+    """Get or send weekly performance report."""
+    if not WEEKLY_REPORTER_AVAILABLE or not get_weekly_reporter:
+        return jsonify({'status': 'error', 'message': 'Weekly reporter not available'}), 500
+    
+    reporter = get_weekly_reporter()
+    
+    # If POST, send to Telegram
+    if request.method == 'POST':
+        report_text = reporter.format_telegram_report()
+        success = False
+        
+        if telegram_notifier:
+            success = telegram_notifier.send_message(report_text)
+        if telegram_group_notifier:
+            telegram_group_notifier.send_message(report_text)
+        
+        # Archive the report
+        reporter.save_weekly_archive()
+        
+        return jsonify({
+            'status': 'success' if success else 'error',
+            'message': 'Weekly report sent to Telegram' if success else 'Failed to send',
+            'report': reporter.get_weekly_stats()
+        })
+    
+    # GET returns the data
+    return jsonify({
+        'status': 'success',
+        'report': reporter.get_weekly_stats(),
+        'formatted': reporter.format_telegram_report()
+    })
+
+
+@app.route('/abtest', methods=['GET', 'POST'])
+def get_ab_test():
+    """Get A/B test comparison or send report."""
+    if not AB_TESTING_AVAILABLE or not get_ab_framework:
+        return jsonify({'status': 'error', 'message': 'A/B Testing not available'}), 500
+    
+    framework = get_ab_framework()
+    
+    # If POST with action=reset, reset tests
+    if request.method == 'POST':
+        action = request.json.get('action', '') if request.is_json else request.args.get('action', '')
+        
+        if action == 'reset':
+            framework.reset_tests()
+            return jsonify({'status': 'success', 'message': 'A/B tests reset'})
+        
+        # Otherwise send report to Telegram
+        report_text = framework.format_telegram_report()
+        success = False
+        
+        if telegram_notifier:
+            success = telegram_notifier.send_message(report_text)
+        
+        return jsonify({
+            'status': 'success' if success else 'error',
+            'message': 'A/B report sent to Telegram' if success else 'Failed to send'
+        })
+    
+    # GET returns comparison
+    return jsonify({
+        'status': 'success',
+        'comparison': framework.get_comparison_report(),
+        'formatted': framework.format_telegram_report()
+    })
+
+
+@app.route('/ml/stats', methods=['GET'])
+def get_ml_stats():
+    """Get ML risk model statistics."""
+    if not ML_RISK_AVAILABLE or not get_ml_risk_model:
+        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+    
+    model = get_ml_risk_model()
+    stats = model.get_model_stats()
+    
+    return jsonify({
+        'status': 'success',
+        'stats': stats
+    })
+
+
+@app.route('/ml/train', methods=['POST'])
+def train_ml_model():
+    """Manually trigger ML model training."""
+    if not ML_RISK_AVAILABLE or not get_ml_risk_model:
+        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+    
+    model = get_ml_risk_model()
+    result = model.train()
+    
+    # Notify via Telegram
+    if telegram_notifier and result.get('status') == 'trained':
+        telegram_notifier.send_message(
+            f"🤖 *ML Model Trained*\n\n"
+            f"Samples: {result.get('samples', 0)}\n"
+            f"Accuracy: {result.get('accuracy', 0)*100:.1f}%\n"
+            f"Win Rate: {result.get('win_rate', 0)*100:.1f}%"
+        )
+    
+    return jsonify({
+        'status': 'success',
+        'result': result
+    })
+
+
+@app.route('/ml/log', methods=['POST'])
+def log_ml_trade():
+    """Log a trade outcome for ML training."""
+    if not ML_RISK_AVAILABLE or not get_ml_risk_model:
+        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+    
+    data = request.json
+    if not data:
+        return jsonify({'status': 'error', 'message': 'No data provided'}), 400
+    
+    signal_data = data.get('signal', {})
+    market_context = data.get('market_context', {})
+    outcome = data.get('outcome', 'loss')  # 'win' or 'loss'
+    pips = data.get('pips', 0)
+    
+    model = get_ml_risk_model()
+    model.log_trade(signal_data, market_context, outcome, pips)
+    
+    return jsonify({
+        'status': 'success',
+        'message': f'Trade logged: {outcome} ({pips:+.1f} pips)',
+        'total_samples': len(model.training_data)
+    })
+
+
 @app.route('/debug', methods=['GET'])
 def debug_analysis():
     """Debug endpoint to see why each option is failing."""
@@ -827,7 +1088,13 @@ if __name__ == '__main__':
     
     def daily_report_scheduler():
         """Background thread to send daily reports at end of session."""
-        last_report_date = None
+        # Initialize to today to prevent immediate report on restart
+        from datetime import datetime as dt_inner
+        last_report_date = dt_inner.utcnow().date()
+        last_weekly_date = dt_inner.utcnow().date() if dt_inner.utcnow().weekday() == 6 else None
+        
+        # Wait 5 minutes before first check to avoid startup spam
+        time_module.sleep(300)
         
         while True:
             try:
@@ -852,6 +1119,24 @@ if __name__ == '__main__':
                             logger.info("📊 Daily report sent to Telegram (personal + group)")
                         
                         last_report_date = today
+                
+                # Send weekly report on Sunday at 17:00 UTC
+                if now.weekday() == 6 and now.hour >= 17 and last_weekly_date != today:
+                    if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
+                        reporter = get_weekly_reporter()
+                        weekly_text = reporter.format_telegram_report()
+                        
+                        # Send to personal
+                        if telegram_notifier:
+                            telegram_notifier.send_message(weekly_text)
+                        # Send to group
+                        if telegram_group_notifier:
+                            telegram_group_notifier.send_message(weekly_text)
+                        
+                        # Archive the report
+                        reporter.save_weekly_archive()
+                        logger.info("📊 Weekly report sent to Telegram (personal + group)")
+                        last_weekly_date = today
                 
                 # Check every 30 minutes
                 time_module.sleep(1800)
@@ -881,18 +1166,8 @@ if __name__ == '__main__':
         
         logger.info("🤖 Telegram command handler started")
         
-        # Send startup message
-        if telegram_notifier:
-            telegram_notifier.send_message(
-                "🤖 <b>Jarvis Command System Active</b>\n\n"
-                "Available commands:\n"
-                "/status - Bot status & current prices\n"
-                "/report - Send daily report now\n"
-                "/pairs - Show tracked pairs\n"
-                "/session - Session info (times)\n"
-                "/stats - Today's statistics\n"
-                "/help - Show this help"
-            )
+        # Startup message disabled to avoid spam on restarts
+        # Use /help command instead
         
         while True:
             try:
@@ -1025,11 +1300,68 @@ if __name__ == '__main__':
                             "🤖 <b>Jarvis Commands</b>\n\n"
                             "/status - Bot status & prices\n"
                             "/report - Send daily report\n"
+                            "/weekly - Send weekly report\n"
+                            "/ml - ML model stats\n"
+                            "/abtest - A/B test comparison\n"
                             "/pairs - Tracked pairs\n"
                             "/session - Session times\n"
                             "/stats - Today's statistics\n"
                             "/help - This help message"
                         )
+                    
+                    elif text == '/ml':
+                        # Send ML model stats
+                        if ML_RISK_AVAILABLE and get_ml_risk_model:
+                            model = get_ml_risk_model()
+                            stats = model.get_model_stats()
+                            
+                            status_emoji = "🟢" if stats.get('model_active') else "🟡"
+                            
+                            ml_text = (
+                                f"🤖 <b>ML Risk Model</b>\n\n"
+                                f"Status: {status_emoji} {stats.get('status', 'unknown').replace('_', ' ').title()}\n"
+                                f"Training Samples: {stats.get('total_samples', 0)}\n"
+                                f"Wins: {stats.get('wins', 0)} | Losses: {stats.get('losses', 0)}\n"
+                                f"Win Rate: {stats.get('win_rate', 0)*100:.1f}%\n\n"
+                            )
+                            
+                            # By symbol
+                            by_sym = stats.get('by_symbol', {})
+                            if by_sym:
+                                ml_text += "<b>By Symbol:</b>\n"
+                                for sym, data in by_sym.items():
+                                    wr = data['wins'] / data['total'] * 100 if data['total'] > 0 else 0
+                                    ml_text += f"  {sym}: {wr:.0f}% ({data['total']} trades)\n"
+                            
+                            if telegram_notifier:
+                                telegram_notifier.send_message(ml_text)
+                            response_text = "🤖 ML stats sent!"
+                        else:
+                            response_text = "❌ ML Risk Model not available"
+                    
+                    elif text == '/weekly':
+                        # Send weekly report
+                        if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
+                            reporter = get_weekly_reporter()
+                            weekly_text = reporter.format_telegram_report()
+                            if telegram_notifier:
+                                telegram_notifier.send_message(weekly_text)
+                            if telegram_group_notifier:
+                                telegram_group_notifier.send_message(weekly_text)
+                            response_text = "📊 Weekly report sent!"
+                        else:
+                            response_text = "❌ Weekly reporter not available"
+                    
+                    elif text == '/abtest':
+                        # Send A/B test comparison
+                        if AB_TESTING_AVAILABLE and get_ab_framework:
+                            framework = get_ab_framework()
+                            ab_text = framework.format_telegram_report()
+                            if telegram_notifier:
+                                telegram_notifier.send_message(ab_text)
+                            response_text = "🔬 A/B test report sent!"
+                        else:
+                            response_text = "❌ A/B Testing not available"
                     
                     # Send response to wherever the command came from
                     if response_text:
