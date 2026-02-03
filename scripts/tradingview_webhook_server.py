@@ -18,11 +18,36 @@ from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime
 import logging
 import json
+import requests
 from typing import Dict, List
 
 # Import strategy only (no broker connectors)
 from core.flexible_ict_strategy import FlexibleICTStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
+
+# Import PulseGraph advisory integration
+try:
+    from integrations.pulsegraph import ForexSentimentAdvisor
+    PULSEGRAPH_AVAILABLE = True
+except ImportError:
+    PULSEGRAPH_AVAILABLE = False
+    ForexSentimentAdvisor = None
+
+# Import Telegram integration
+try:
+    from integrations.telegram_bot import get_telegram_notifier, init_telegram
+    TELEGRAM_AVAILABLE = True
+except ImportError:
+    TELEGRAM_AVAILABLE = False
+    get_telegram_notifier = None
+
+# Import Daily Report tracker
+try:
+    from integrations.daily_report import get_report_tracker
+    REPORT_TRACKER_AVAILABLE = True
+except ImportError:
+    REPORT_TRACKER_AVAILABLE = False
+    get_report_tracker = None
 
 # Setup logging
 logging.basicConfig(
@@ -50,25 +75,173 @@ if not WEBHOOK_SECRET or WEBHOOK_SECRET == 'your_secret_key_here':
 
 ACCOUNT_BALANCE = 10000.0
 
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = '8001169647:AAESVk1NjD2ppFUHVDoPq_OamyGHx3gBUU0'
+TELEGRAM_CHAT_ID = '117216462'  # Personal chat
+TELEGRAM_GROUP_ID = '-5005853931'  # Trading Admin group
+
+# Initialize Telegram notifiers (personal + group)
+telegram_notifier = None
+telegram_group_notifier = None
+
+if TELEGRAM_AVAILABLE:
+    telegram_notifier = init_telegram(bot_token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
+    # Create second notifier for group
+    from integrations.telegram_bot import TelegramNotifier
+    telegram_group_notifier = TelegramNotifier(bot_token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_GROUP_ID)
+    logger.info("✅ Telegram notifications enabled (personal + group)")
+else:
+    telegram_notifier = None
+
+# Data persistence paths
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+MARKET_DATA_FILE = os.path.join(DATA_DIR, 'market_data.json')
+SIGNALS_FILE = os.path.join(DATA_DIR, 'active_signals.json')
+
+# Ensure data directory exists
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def save_market_data():
+    """Save market data to file for persistence."""
+    try:
+        with open(MARKET_DATA_FILE, 'w') as f:
+            json.dump(market_data, f)
+        logger.debug("Market data saved to disk")
+    except Exception as e:
+        logger.error(f"Failed to save market data: {e}")
+
+def load_market_data():
+    """Load market data from file on startup."""
+    global market_data
+    try:
+        if os.path.exists(MARKET_DATA_FILE):
+            with open(MARKET_DATA_FILE, 'r') as f:
+                market_data = json.load(f)
+            # Count candles loaded
+            for symbol, data in market_data.items():
+                counts = {tf: len(data.get(tf, {}).get('close', [])) for tf in ['4H', '1H', '15M', '5M']}
+                logger.info(f"Loaded {symbol} data: {counts}")
+            logger.info("Market data restored from disk")
+    except Exception as e:
+        logger.warning(f"Could not load market data: {e}")
+        market_data = {}
+
+def save_signals():
+    """Save active signals to file for persistence."""
+    try:
+        with open(SIGNALS_FILE, 'w') as f:
+            json.dump(active_signals, f)
+    except Exception as e:
+        logger.error(f"Failed to save signals: {e}")
+
+def load_signals():
+    """Load active signals from file on startup."""
+    global active_signals, signal_counter
+    try:
+        if os.path.exists(SIGNALS_FILE):
+            with open(SIGNALS_FILE, 'r') as f:
+                active_signals = json.load(f)
+            # Update signal counter to avoid ID collisions
+            if active_signals:
+                max_counter = max(int(s['id'].split('_')[2]) for s in active_signals.values() if '_' in s['id'])
+                signal_counter = max_counter + 1
+            logger.info(f"Loaded {len(active_signals)} signals from disk")
+    except Exception as e:
+        logger.warning(f"Could not load signals: {e}")
+        active_signals = {}
+
 # Store market data in memory
 market_data = {}
 
+# Store active signals (persist until executed or cancelled)
+active_signals = {}  # {signal_id: signal_data}
+signal_counter = 0
+
+# Load persisted data on startup
+load_market_data()
+load_signals()
+
+def add_signal_to_history(signal, symbol):
+    """Add a signal that persists until executed or cancelled."""
+    global signal_counter
+    
+    # Check for duplicate - same symbol, direction, setup_type, and similar entry price
+    entry_price = signal.get('entry', signal.get('entry_price', 0))
+    direction = signal.get('direction', signal.get('type', ''))
+    setup_type = signal.get('setup_type', '')
+    
+    for existing in active_signals.values():
+        if existing['status'] != 'pending':
+            continue
+        if existing['symbol'] != symbol:
+            continue
+        if existing.get('direction', existing.get('type', '')) != direction:
+            continue
+        if existing.get('setup_type', '') != setup_type:
+            continue
+        # Check if entry price is within 0.01% (essentially the same)
+        existing_entry = existing.get('entry', existing.get('entry_price', 0))
+        if existing_entry and abs(entry_price - existing_entry) / existing_entry < 0.0001:
+            logger.info(f"⚠️ Duplicate signal ignored for {symbol} - already have pending {setup_type} {direction}")
+            return None
+    
+    signal_counter += 1
+    signal_id = f"{symbol}_{signal_counter}_{int(datetime.now().timestamp())}"
+    
+    signal_entry = {
+        'id': signal_id,
+        'timestamp': signal.get('timestamp', int(datetime.now().timestamp())),
+        'detected_at': datetime.now().isoformat(),
+        'symbol': symbol,
+        'status': 'pending',  # pending, executed, cancelled, expired
+        **signal
+    }
+    active_signals[signal_id] = signal_entry
+    save_signals()  # Persist to disk
+    logger.info(f"📌 Signal saved: {signal_id}")
+    return signal_id
+
+def mark_signal_executed(signal_id):
+    """Mark a signal as executed."""
+    if signal_id in active_signals:
+        active_signals[signal_id]['status'] = 'executed'
+        active_signals[signal_id]['executed_at'] = datetime.now().isoformat()
+        save_signals()  # Persist to disk
+        logger.info(f"✅ Signal executed: {signal_id}")
+        return True
+    return False
+
+def cancel_signal(signal_id):
+    """Cancel a pending signal."""
+    if signal_id in active_signals:
+        active_signals[signal_id]['status'] = 'cancelled'
+        active_signals[signal_id]['cancelled_at'] = datetime.now().isoformat()
+        save_signals()  # Persist to disk
+        logger.info(f"❌ Signal cancelled: {signal_id}")
+        return True
+    return False
+
+def get_pending_signals():
+    """Get all pending (not yet executed) signals."""
+    return [s for s in active_signals.values() if s['status'] == 'pending']
+
 def convert_to_candles_list(columnar_data):
-    """Convert columnar market data to list of dicts for strategy."""
+    """Convert columnar market data to list of candle dicts for strategy."""
     if not columnar_data or not columnar_data.get('time'):
         return []
     
-    length = len(columnar_data['time'])
     candles = []
-    for i in range(length):
-        candles.append({
+    for i in range(len(columnar_data['time'])):
+        candle = {
+            'timestamp': columnar_data['time'][i],  # Strategy expects 'timestamp'
             'time': columnar_data['time'][i],
             'open': columnar_data['open'][i],
             'high': columnar_data['high'][i],
             'low': columnar_data['low'][i],
             'close': columnar_data['close'][i],
             'volume': columnar_data['volume'][i]
-        })
+        }
+        candles.append(candle)
     return candles
 
 # Initialize strategy
@@ -81,6 +254,19 @@ risk_manager = EnhancedRiskManager(
     max_daily_loss=4.0,
     max_trades_per_day=2
 )
+
+# Initialize PulseGraph advisor (advisory only - does not affect trades)
+sentiment_advisor = None
+if PULSEGRAPH_AVAILABLE:
+    try:
+        sentiment_advisor = ForexSentimentAdvisor()
+        success, msg = sentiment_advisor.initialize()
+        logger.info(f"PulseGraph Advisory: {msg}")
+    except Exception as e:
+        logger.warning(f"PulseGraph advisor not available: {e}")
+        sentiment_advisor = None
+else:
+    logger.info("PulseGraph not installed - advisory sentiment disabled")
 
 
 @app.route('/webhook', methods=['POST'])
@@ -123,11 +309,12 @@ def webhook():
         
         timeframe = data.get('timeframe', '5M')
         
-        # Store candle data
+        # Store candle data - 4H, 1H, 15M, 5M
         if symbol not in market_data:
             market_data[symbol] = {
                 '4H': {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []},
                 '1H': {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []},
+                '15M': {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []},
                 '5M': {'time': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []}
             }
         
@@ -141,24 +328,43 @@ def webhook():
             candles['close'].append(float(data.get('close', 0)))
             candles['volume'].append(int(data.get('volume', 0)))
             
+            # Track candles analyzed (only for 5M which is our entry timeframe)
+            if timeframe == '5M' and REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                try:
+                    tracker = get_report_tracker()
+                    tracker.record_stats('candles_analyzed')
+                except:
+                    pass
+            
             # Keep last 100 candles only
             for key in candles:
                 if len(candles[key]) > 100:
                     candles[key] = candles[key][-100:]
         
-        # Check if we have enough data to analyze
+        # Save market data periodically (every 10th candle to reduce disk I/O)
+        total_candles = sum(len(market_data[symbol].get(tf, {}).get('close', [])) for tf in ['5M'])
+        if total_candles % 10 == 0:
+            save_market_data()
+        
+        # Check if we have enough data to analyze (need all 4 timeframes)
         if (len(market_data[symbol].get('4H', {}).get('close', [])) >= 50 and
             len(market_data[symbol].get('1H', {}).get('close', [])) >= 50 and
+            len(market_data[symbol].get('15M', {}).get('close', [])) >= 50 and
             len(market_data[symbol].get('5M', {}).get('close', [])) >= 50):
             
             # Run strategy analysis
             current_price = data.get('close', 0)
             
-            # Convert data formats
-            candles_list = convert_to_candles_list(market_data[symbol]['5M'])
+            # Convert ALL timeframes to candle lists for MTF analysis
+            mtf_data = {
+                '4H': convert_to_candles_list(market_data[symbol]['4H']),
+                '1H': convert_to_candles_list(market_data[symbol]['1H']),
+                '15M': convert_to_candles_list(market_data[symbol]['15M']),
+                '5M': convert_to_candles_list(market_data[symbol]['5M'])
+            }
             
-            # Use new flexible strategy with 3 setup options
-            signal = strategy.analyze(candles_list, symbol=symbol)
+            # Use new flexible strategy with 3 setup options and MTF data
+            signal = strategy.analyze(mtf_data['5M'], symbol=symbol, mtf_data=mtf_data)
             
             if signal:
                 setup_name = signal.get('setup_type', 'UNKNOWN')
@@ -176,9 +382,38 @@ def webhook():
                 logger.info(f"   Risk Size: {risk_pct:.1f}% (Full={len(confirmations)>=3})")
                 logger.info(f"   Confidence: {signal.get('confidence', 0):.2f}")
                 
+                # Add futures note for gold
+                if 'XAU' in symbol:
+                    signal['price_note'] = "Futures price - spot typically ~$30-40 lower"
+                    logger.info(f"   ⚠️ Note: Futures price - spot typically ~$30-40 lower")
+                
                 # Normalize signal structure for frontend
                 signal['type'] = signal['direction']
                 signal['entry'] = signal['entry_price']
+                
+                # Store signal in history for dashboard
+                add_signal_to_history(signal, symbol)
+                
+                # Record signal for daily report
+                if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                    try:
+                        tracker = get_report_tracker()
+                        tracker.record_signal(signal, symbol)
+                    except Exception as e:
+                        logger.error(f"Report tracker error: {e}")
+                
+                # Send Telegram notification (personal + group)
+                if telegram_notifier:
+                    try:
+                        telegram_notifier.notify_signal(signal, symbol)
+                    except Exception as e:
+                        logger.error(f"Telegram personal notification failed: {e}")
+                
+                if telegram_group_notifier:
+                    try:
+                        telegram_group_notifier.notify_signal(signal, symbol)
+                    except Exception as e:
+                        logger.error(f"Telegram group notification failed: {e}")
                 
                 return jsonify({
                     'status': 'signal_detected',
@@ -186,6 +421,25 @@ def webhook():
                     'message': f'{signal["direction"]} signal for {symbol}'
                 }), 200
             else:
+                # Record rejection reasons for daily report
+                if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                    try:
+                        tracker = get_report_tracker()
+                        # Get rejection reasons from strategy
+                        reasons = strategy.get_last_rejection_reasons() if hasattr(strategy, 'get_last_rejection_reasons') else ['No valid ICT setup']
+                        tracker.record_rejection(symbol, reasons)
+                        tracker.record_stats('setups_checked')
+                        
+                        # Track valid sweeps and BoS detected
+                        if hasattr(strategy, 'get_last_analysis_stats'):
+                            stats = strategy.get_last_analysis_stats()
+                            if stats.get('sweep_found'):
+                                tracker.record_stats('valid_sweeps')
+                            if stats.get('bos_found'):
+                                tracker.record_stats('valid_bos')
+                    except Exception as e:
+                        logger.debug(f"Report tracker error: {e}")
+                
                 return jsonify({
                     'status': 'no_signal',
                     'message': f'No setup for {symbol} at {current_price:.5f}'
@@ -241,6 +495,14 @@ def get_data():
         })
 
 
+# Minimum candle requirements per timeframe (realistic for live trading)
+MIN_CANDLES = {
+    '4H': 10,   # 40 hours of data
+    '1H': 20,   # 20 hours of data  
+    '15M': 30,  # 7.5 hours of data
+    '5M': 50    # ~4 hours of data
+}
+
 @app.route('/signals', methods=['GET'])
 def get_signals():
     """Get latest signals for all tracked symbols."""
@@ -249,16 +511,23 @@ def get_signals():
         try:
             data_4h = data.get('4H', {})
             data_1h = data.get('1H', {})
+            data_15m = data.get('15M', {})
             data_5m = data.get('5M', {})
             
-            if (len(data_4h.get('close', [])) >= 50 and
-                len(data_1h.get('close', [])) >= 50 and
-                len(data_5m.get('close', [])) >= 50):
+            if (len(data_4h.get('close', [])) >= MIN_CANDLES['4H'] and
+                len(data_1h.get('close', [])) >= MIN_CANDLES['1H'] and
+                len(data_15m.get('close', [])) >= MIN_CANDLES['15M'] and
+                len(data_5m.get('close', [])) >= MIN_CANDLES['5M']):
                 
-                # Convert data formats
-                candles_list = convert_to_candles_list(data_5m)
+                # Convert ALL timeframes for MTF analysis
+                mtf_data = {
+                    '4H': convert_to_candles_list(data_4h),
+                    '1H': convert_to_candles_list(data_1h),
+                    '15M': convert_to_candles_list(data_15m),
+                    '5M': convert_to_candles_list(data_5m)
+                }
                 
-                signal = strategy.analyze(candles_list, symbol=symbol)
+                signal = strategy.analyze(mtf_data['5M'], symbol=symbol, mtf_data=mtf_data)
                 
                 if signal:
                     # Normalize keys for frontend
@@ -279,6 +548,247 @@ def get_signals():
     })
 
 
+@app.route('/signals/history', methods=['GET'])
+def get_signal_history():
+    """Get all signals (pending and executed) for dashboard."""
+    pending = get_pending_signals()
+    all_signals = list(active_signals.values())
+    return jsonify({
+        'status': 'success',
+        'pending_count': len(pending),
+        'total_count': len(all_signals),
+        'pending': pending,
+        'all': all_signals
+    })
+
+
+@app.route('/signals/execute/<signal_id>', methods=['POST'])
+def execute_signal(signal_id):
+    """Mark a signal as executed (trade taken)."""
+    if mark_signal_executed(signal_id):
+        return jsonify({'status': 'success', 'message': f'Signal {signal_id} marked as executed'})
+    return jsonify({'status': 'error', 'message': 'Signal not found'}), 404
+
+
+@app.route('/signals/cancel/<signal_id>', methods=['POST'])
+def cancel_signal_endpoint(signal_id):
+    """Cancel a pending signal."""
+    if cancel_signal(signal_id):
+        return jsonify({'status': 'success', 'message': f'Signal {signal_id} cancelled'})
+    return jsonify({'status': 'error', 'message': 'Signal not found'}), 404
+
+
+@app.route('/report/daily', methods=['GET', 'POST'])
+def get_daily_report():
+    """Get or send daily trading report."""
+    if not REPORT_TRACKER_AVAILABLE or not get_report_tracker:
+        return jsonify({'status': 'error', 'message': 'Report tracker not available'}), 500
+    
+    tracker = get_report_tracker()
+    report_data = tracker.get_report_data()
+    
+    # If POST, send to Telegram (personal + group)
+    if request.method == 'POST':
+        success = False
+        if telegram_notifier:
+            success = telegram_notifier.send_daily_report(report_data)
+        if telegram_group_notifier:
+            telegram_group_notifier.send_daily_report(report_data)
+        return jsonify({
+            'status': 'success' if success else 'error',
+            'message': 'Report sent to Telegram' if success else 'Failed to send',
+            'report': report_data
+        })
+    
+    # GET just returns the data
+    return jsonify({
+        'status': 'success',
+        'report': report_data
+    })
+
+
+@app.route('/debug', methods=['GET'])
+def debug_analysis():
+    """Debug endpoint to see why each option is failing."""
+    debug_info = {}
+    for symbol, data in market_data.items():
+        try:
+            data_4h = data.get('4H', {})
+            data_1h = data.get('1H', {})
+            data_15m = data.get('15M', {})
+            data_5m = data.get('5M', {})
+            
+            candle_counts = {
+                '4H': len(data_4h.get('close', [])),
+                '1H': len(data_1h.get('close', [])),
+                '15M': len(data_15m.get('close', [])),
+                '5M': len(data_5m.get('close', []))
+            }
+            
+            # Check each timeframe against its minimum requirement
+            has_enough_data = all(
+                candle_counts[tf] >= MIN_CANDLES[tf] for tf in MIN_CANDLES
+            )
+            
+            if has_enough_data:
+                mtf_data = {
+                    '4H': convert_to_candles_list(data_4h),
+                    '1H': convert_to_candles_list(data_1h),
+                    '15M': convert_to_candles_list(data_15m),
+                    '5M': convert_to_candles_list(data_5m)
+                }
+                
+                strategy.set_mtf_data(mtf_data)
+                base_candles = mtf_data['5M']
+                
+                # Check each component
+                htf_trend_4h = strategy.determine_htf_trend(base_candles, 240)
+                htf_trend_1h = strategy.determine_htf_trend(base_candles, 60)
+                has_sweep, sweep_type = strategy.check_liquidity_sweep(base_candles, symbol)
+                has_bos_long = strategy.check_bos(base_candles, 'long')
+                has_bos_short = strategy.check_bos(base_candles, 'short')
+                has_choch_long = strategy.check_choch(base_candles, 'long')
+                has_choch_short = strategy.check_choch(base_candles, 'short')
+                htf_zones_4h = strategy.find_htf_zones(base_candles, 240)
+                htf_zones_1h = strategy.find_htf_zones(base_candles, 60)
+                order_blocks = strategy.find_order_blocks(base_candles, 5)
+                fvgs = strategy.find_fvgs(base_candles)
+                
+                debug_info[symbol] = {
+                    'candle_counts': candle_counts,
+                    'htf_trend_4h': htf_trend_4h.value,
+                    'htf_trend_1h': htf_trend_1h.value,
+                    'has_liquidity_sweep': has_sweep,
+                    'sweep_type': sweep_type,
+                    'has_bos_long': has_bos_long,
+                    'has_bos_short': has_bos_short,
+                    'has_choch_long': has_choch_long,
+                    'has_choch_short': has_choch_short,
+                    'htf_zones_4h_count': len(htf_zones_4h),
+                    'htf_zones_1h_count': len(htf_zones_1h),
+                    'order_blocks_count': len(order_blocks),
+                    'fvgs_count': len(fvgs),
+                    'can_trade': strategy.can_take_trade(base_candles[-1]['timestamp']),
+                    'current_session': strategy.filters.get_current_session(base_candles[-1]['timestamp'])
+                }
+            else:
+                debug_info[symbol] = {'status': 'insufficient_data', 'candle_counts': candle_counts}
+        except Exception as e:
+            debug_info[symbol] = {'error': str(e)}
+    
+    return jsonify(debug_info)
+
+
+# ============================================================
+# PulseGraph Advisory Endpoints (ADVISORY ONLY - no trade impact)
+# ============================================================
+
+@app.route('/advisory/sentiment', methods=['GET'])
+def get_advisory_sentiment():
+    """
+    Get market sentiment advisory for forex pairs.
+    ADVISORY ONLY - Does NOT affect trade decisions.
+    """
+    if not sentiment_advisor:
+        return jsonify({
+            'status': 'unavailable',
+            'message': 'Sentiment advisor not configured (Neo4j/OpenAI not available)',
+            'pairs': {}
+        }), 200
+    
+    try:
+        pair = request.args.get('pair', None)
+        
+        if pair:
+            # Get advisory for specific pair
+            signal = sentiment_advisor.get_advisory(pair)
+            return jsonify({
+                'status': 'success',
+                'advisory_note': 'This is ADVISORY ONLY - does not affect trade decisions',
+                'pair': signal.to_dict()
+            })
+        else:
+            # Get full market context
+            context = sentiment_advisor.get_market_context()
+            return jsonify({
+                'status': 'success',
+                'advisory_note': 'This is ADVISORY ONLY - does not affect trade decisions',
+                'context': context.to_dict()
+            })
+    except Exception as e:
+        logger.error(f"Advisory sentiment error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/advisory/html', methods=['GET'])
+def get_advisory_html():
+    """Get HTML formatted advisory for dashboard."""
+    if not sentiment_advisor:
+        return """
+        <div class="market-sentiment">
+            <h3>📊 Market Sentiment Advisory</h3>
+            <p class="advisory-note">⚠️ Not configured (Neo4j not available)</p>
+            <p>Run with Neo4j and OpenAI for sentiment analysis.</p>
+        </div>
+        """
+    
+    try:
+        return sentiment_advisor.format_for_dashboard()
+    except Exception as e:
+        logger.error(f"Advisory HTML error: {e}")
+        return f"""
+        <div class="market-sentiment">
+            <h3>📊 Market Sentiment Advisory</h3>
+            <p class="advisory-note">⚠️ Error: {e}</p>
+        </div>
+        """
+
+
+@app.route('/advisory/events', methods=['GET'])
+def get_upcoming_events():
+    """Get upcoming economic events affecting forex pairs."""
+    if not sentiment_advisor or not sentiment_advisor.graph.is_available:
+        return jsonify({
+            'status': 'unavailable',
+            'message': 'Event calendar not available (Neo4j not configured)',
+            'events': []
+        }), 200
+    
+    try:
+        hours = int(request.args.get('hours', 24))
+        currency = request.args.get('currency', None)
+        
+        events = sentiment_advisor.graph.get_upcoming_events(
+            currency=currency, 
+            hours_ahead=hours
+        )
+        
+        return jsonify({
+            'status': 'success',
+            'events': [
+                {
+                    'id': e.id,
+                    'title': e.title,
+                    'currency': e.currency,
+                    'impact': e.impact.value,
+                    'scheduled_at': e.scheduled_at.isoformat(),
+                    'forecast': e.forecast,
+                    'previous': e.previous
+                }
+                for e in events
+            ]
+        })
+    except Exception as e:
+        logger.error(f"Events error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
 if __name__ == '__main__':
     PORT = 5000
     
@@ -287,12 +797,16 @@ if __name__ == '__main__':
     print("="*70)
     print("Mode: ANALYSIS ONLY (No broker, no real trades)")
     print("Webhook Secret: " + ("*" * 8) + " (configured)" if WEBHOOK_SECRET and WEBHOOK_SECRET != 'your_secret_key_here' else "WARNING: Using default secret!")
+    print(f"PulseGraph Advisory: {'ENABLED' if sentiment_advisor else 'DISABLED (Neo4j not available)'}")
     print(f"\nServer starting on http://localhost:{PORT}")
     print("\nEndpoints:")
-    print("  POST /webhook  - Receive TradingView market data")
-    print("  GET  /health   - Health check")
-    print("  GET  /data     - View collected market data")
-    print("  GET  /signals  - Check current strategy signals")
+    print("  POST /webhook         - Receive TradingView market data")
+    print("  GET  /health          - Health check")
+    print("  GET  /data            - View collected market data")
+    print("  GET  /signals         - Check current strategy signals")
+    print("  GET  /advisory/sentiment - Market sentiment (ADVISORY ONLY)")
+    print("  GET  /advisory/html   - Sentiment HTML for dashboard")
+    print("  GET  /advisory/events - Upcoming economic events")
     print("\nTo connect TradingView:")
     print("  1. Install ngrok: brew install ngrok")
     print(f"  2. Run: ngrok http {PORT}")
@@ -305,6 +819,242 @@ if __name__ == '__main__':
     
     # Create logs directory if it doesn't exist
     os.makedirs('logs', exist_ok=True)
+    
+    # Start daily report scheduler in background
+    import threading
+    import time as time_module
+    from datetime import datetime as dt
+    
+    def daily_report_scheduler():
+        """Background thread to send daily reports at end of session."""
+        last_report_date = None
+        
+        while True:
+            try:
+                now = dt.utcnow()
+                today = now.date()
+                
+                # Send report after 17:00 UTC (session close) 
+                if now.hour >= 17 and last_report_date != today:
+                    if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                        tracker = get_report_tracker()
+                        report_data = tracker.get_report_data()
+                        
+                        # Only send if we have some activity
+                        if report_data.get('signals_generated') or report_data.get('rejections_summary'):
+                            # Send to personal
+                            if telegram_notifier:
+                                telegram_notifier.send_daily_report(report_data)
+                            # Send to group
+                            if telegram_group_notifier:
+                                telegram_group_notifier.send_daily_report(report_data)
+                            tracker.mark_report_sent()
+                            logger.info("📊 Daily report sent to Telegram (personal + group)")
+                        
+                        last_report_date = today
+                
+                # Check every 30 minutes
+                time_module.sleep(1800)
+                
+            except Exception as e:
+                logger.error(f"Daily report scheduler error: {e}")
+                time_module.sleep(300)  # Wait 5 min on error
+    
+    # Start scheduler thread
+    if REPORT_TRACKER_AVAILABLE and telegram_notifier:
+        scheduler_thread = threading.Thread(target=daily_report_scheduler, daemon=True)
+        scheduler_thread.start()
+        logger.info("📅 Daily report scheduler started")
+    
+    # ============================================
+    # TELEGRAM COMMAND HANDLER
+    # Allows you to control the bot via Telegram
+    # ============================================
+    
+    def telegram_command_handler():
+        """Poll for Telegram commands and respond."""
+        import time as time_module
+        
+        last_update_id = 0
+        ADMIN_USER_ID = '117216462'  # Your Telegram USER ID (not chat ID)
+        GROUP_CHAT_ID = TELEGRAM_GROUP_ID  # Group chat ID
+        
+        logger.info("🤖 Telegram command handler started")
+        
+        # Send startup message
+        if telegram_notifier:
+            telegram_notifier.send_message(
+                "🤖 <b>Jarvis Command System Active</b>\n\n"
+                "Available commands:\n"
+                "/status - Bot status & current prices\n"
+                "/report - Send daily report now\n"
+                "/pairs - Show tracked pairs\n"
+                "/session - Session info (times)\n"
+                "/stats - Today's statistics\n"
+                "/help - Show this help"
+            )
+        
+        while True:
+            try:
+                # Get updates from Telegram
+                url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+                params = {'offset': last_update_id + 1, 'timeout': 30}
+                
+                response = requests.get(url, params=params, timeout=35)
+                data = response.json()
+                
+                if not data.get('ok'):
+                    time_module.sleep(5)
+                    continue
+                
+                for update in data.get('result', []):
+                    last_update_id = update['update_id']
+                    
+                    message = update.get('message', {})
+                    chat_id = str(message.get('chat', {}).get('id', ''))
+                    user_id = str(message.get('from', {}).get('id', ''))
+                    text = message.get('text', '').strip().lower()
+                    
+                    # Only respond to YOUR commands (works in personal chat AND group)
+                    if user_id != ADMIN_USER_ID:
+                        continue
+                    
+                    # Determine where to send the response
+                    # If command came from group, reply to group
+                    # If command came from personal chat, reply to personal
+                    response_chat_id = chat_id
+                    
+                    # Process commands
+                    response_text = None
+                    
+                    if text == '/status' or text == '/start':
+                        # Get current prices
+                        prices = []
+                        for sym in ['EURUSD', 'GBPUSD', 'XAUUSD']:
+                            if sym in market_data and market_data[sym].get('5M', {}).get('close'):
+                                price = market_data[sym]['5M']['close'][-1]
+                                prices.append(f"  {sym}: {price:.5f}" if sym != 'XAUUSD' else f"  {sym}: {price:.2f}")
+                        
+                        prices_text = "\n".join(prices) if prices else "  Collecting data..."
+                        
+                        response_text = (
+                            "🤖 <b>Jarvis Status</b>\n\n"
+                            f"🟢 Bot is RUNNING\n"
+                            f"📈 Strategy: ICT/SMC (1:2 R:R)\n"
+                            f"⏰ Session: 10:00-17:00 UTC\n\n"
+                            f"<b>Current Prices:</b>\n{prices_text}"
+                        )
+                    
+                    elif text == '/report':
+                        # Send daily report
+                        if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                            tracker = get_report_tracker()
+                            report_data = tracker.get_report_data()
+                            if telegram_notifier:
+                                telegram_notifier.send_daily_report(report_data)
+                            if telegram_group_notifier:
+                                telegram_group_notifier.send_daily_report(report_data)
+                            response_text = "📊 Daily report sent!"
+                        else:
+                            response_text = "❌ Report tracker not available"
+                    
+                    elif text == '/pairs':
+                        response_text = (
+                            "📊 <b>Tracked Pairs</b>\n\n"
+                            "• EURUSD (6E=F futures)\n"
+                            "• GBPUSD (6B=F futures)\n"
+                            "• XAUUSD (GC=F gold futures)\n\n"
+                            "⚠️ Gold shows futures price (~$30-40 above spot)"
+                        )
+                    
+                    elif text == '/session':
+                        now = datetime.utcnow()
+                        session_start = now.replace(hour=10, minute=0, second=0)
+                        session_end = now.replace(hour=17, minute=0, second=0)
+                        
+                        if 10 <= now.hour < 17 and now.weekday() < 4:
+                            status = "🟢 IN SESSION"
+                            remaining = session_end - now
+                            hours_left = remaining.seconds // 3600
+                            mins_left = (remaining.seconds % 3600) // 60
+                            time_info = f"Ends in {hours_left}h {mins_left}m"
+                        else:
+                            status = "🔴 OUTSIDE SESSION"
+                            if now.weekday() >= 4:
+                                time_info = "Weekend - no trading"
+                            elif now.hour >= 17:
+                                time_info = "Resumes tomorrow 10:00 UTC"
+                            else:
+                                time_info = f"Starts at 10:00 UTC ({10 - now.hour}h away)"
+                        
+                        response_text = (
+                            f"⏰ <b>Session Info</b>\n\n"
+                            f"Status: {status}\n"
+                            f"Time: {now.strftime('%H:%M')} UTC\n"
+                            f"Day: {now.strftime('%A')}\n\n"
+                            f"{time_info}\n\n"
+                            f"📅 Trading Hours: 10:00-17:00 UTC\n"
+                            f"📅 Days: Mon-Thu only"
+                        )
+                    
+                    elif text == '/stats':
+                        if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                            tracker = get_report_tracker()
+                            report = tracker.get_report_data()
+                            stats = report.get('session_stats', {})
+                            rejections = report.get('rejections_summary', {})
+                            signals = report.get('signals_generated', [])
+                            
+                            # Top rejection reasons
+                            top_rejections = sorted(rejections.items(), key=lambda x: x[1], reverse=True)[:3]
+                            rej_text = "\n".join([f"  • {r[0]}: {r[1]}" for r in top_rejections]) or "  None"
+                            
+                            response_text = (
+                                f"📊 <b>Today's Statistics</b>\n\n"
+                                f"<b>Signals:</b> {len(signals)}\n"
+                                f"<b>Candles Analyzed:</b> {stats.get('candles_analyzed', 0)}\n"
+                                f"<b>Setups Checked:</b> {stats.get('setups_checked', 0)}\n"
+                                f"<b>Hours Active:</b> {stats.get('hours_active', 0)}h\n\n"
+                                f"<b>Top Rejections:</b>\n{rej_text}"
+                            )
+                        else:
+                            response_text = "❌ Stats not available"
+                    
+                    elif text == '/help':
+                        response_text = (
+                            "🤖 <b>Jarvis Commands</b>\n\n"
+                            "/status - Bot status & prices\n"
+                            "/report - Send daily report\n"
+                            "/pairs - Tracked pairs\n"
+                            "/session - Session times\n"
+                            "/stats - Today's statistics\n"
+                            "/help - This help message"
+                        )
+                    
+                    # Send response to wherever the command came from
+                    if response_text:
+                        try:
+                            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+                            payload = {
+                                'chat_id': response_chat_id,
+                                'text': response_text,
+                                'parse_mode': 'HTML'
+                            }
+                            requests.post(url, json=payload, timeout=10)
+                        except Exception as e:
+                            logger.error(f"Failed to send command response: {e}")
+                
+                time_module.sleep(1)  # Small delay between polls
+                
+            except Exception as e:
+                logger.error(f"Telegram command handler error: {e}")
+                time_module.sleep(10)
+    
+    # Start Telegram command handler thread
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        command_thread = threading.Thread(target=telegram_command_handler, daemon=True)
+        command_thread.start()
+        logger.info("🤖 Telegram command handler started")
     
     # Run server
     app.run(host='0.0.0.0', port=PORT, debug=False)

@@ -60,6 +60,20 @@ class TradeExecutor:
         self.closed_trades: List[ActiveTrade] = []
         self.order_counter = 0
 
+    def _create_order(self, prefix: str, symbol: str, order_type: OrderType, 
+                      quantity: float, price: float, status: OrderStatus,
+                      opened_at: Optional[datetime] = None) -> Order:
+        """Create an order with common parameters."""
+        return Order(
+            order_id=f"{prefix}_{self.order_counter}",
+            symbol=symbol,
+            order_type=order_type,
+            quantity=quantity,
+            price=price,
+            status=status,
+            opened_at=opened_at
+        )
+
     def open_trade(
         self,
         symbol: str,
@@ -68,43 +82,19 @@ class TradeExecutor:
         target_price: float,
         quantity: float
     ) -> ActiveTrade:
-        """
-        Open a new trade with entry, stop loss, and take profit.
-        """
+        """Open a new trade with entry, stop loss, and take profit."""
         self.order_counter += 1
         
-        # Create entry order
-        entry_order = Order(
-            order_id=f"ENTRY_{self.order_counter}",
-            symbol=symbol,
-            order_type=OrderType.MARKET,
-            quantity=quantity,
-            price=entry_price,
-            status=OrderStatus.OPEN,
-            opened_at=datetime.now()
+        entry_order = self._create_order(
+            "ENTRY", symbol, OrderType.MARKET, quantity, entry_price, OrderStatus.OPEN, datetime.now()
+        )
+        sl_order = self._create_order(
+            "SL", symbol, OrderType.STOP, quantity, stop_loss, OrderStatus.PENDING
+        )
+        tp_order = self._create_order(
+            "TP", symbol, OrderType.LIMIT, quantity, target_price, OrderStatus.PENDING
         )
         
-        # Create stop loss order
-        sl_order = Order(
-            order_id=f"SL_{self.order_counter}",
-            symbol=symbol,
-            order_type=OrderType.STOP,
-            quantity=quantity,
-            price=stop_loss,
-            status=OrderStatus.PENDING
-        )
-        
-        # Create take profit order
-        tp_order = Order(
-            order_id=f"TP_{self.order_counter}",
-            symbol=symbol,
-            order_type=OrderType.LIMIT,
-            quantity=quantity,
-            price=target_price,
-            status=OrderStatus.PENDING
-        )
-        
-        # Create active trade
         trade = ActiveTrade(
             trade_id=f"TRADE_{self.order_counter}",
             symbol=symbol,

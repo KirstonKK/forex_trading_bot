@@ -122,17 +122,34 @@ class EnhancedSMCStrategy:
         
         return MarketStructure.RANGING
     
+    def _create_order_block(self, candle: dict) -> OrderBlock:
+        """Create an OrderBlock from a candle."""
+        return OrderBlock(
+            high=candle['high'],
+            low=candle['low'],
+            timestamp=candle.get('time', candle.get('timestamp', 0)),
+            timeframe="5M",
+            strength=0.8
+        )
+    
+    def _is_valid_bullish_ob(self, curr: dict, next_candles: List[dict]) -> bool:
+        """Check if candle forms a valid bullish order block."""
+        is_bearish = curr['close'] < curr['open']
+        next_bullish = sum(1 for c in next_candles if c['close'] > c['open']) >= 2
+        return is_bearish and next_bullish
+    
+    def _is_valid_bearish_ob(self, curr: dict, next_candles: List[dict]) -> bool:
+        """Check if candle forms a valid bearish order block."""
+        is_bullish = curr['close'] > curr['open']
+        next_bearish = sum(1 for c in next_candles if c['close'] < c['open']) >= 2
+        return is_bullish and next_bearish
+    
     def find_order_blocks_5m(self, candles_5m: List[dict], htf_structure: MarketStructure) -> List[OrderBlock]:
-        """
-        Find order blocks on 5-minute timeframe that align with HTF structure.
-        Order block = last bearish candle before bullish move (or vice versa).
-        """
-        order_blocks = []
-        
+        """Find order blocks on 5-minute timeframe aligned with HTF structure."""
         if len(candles_5m) < 10:
-            return order_blocks
+            return []
         
-        # Look for order blocks in last 50 candles
+        order_blocks = []
         for i in range(len(candles_5m) - 10, len(candles_5m) - 3):
             if i < 2:
                 continue
@@ -140,37 +157,14 @@ class EnhancedSMCStrategy:
             curr = candles_5m[i]
             next_candles = candles_5m[i+1:i+4]
             
-            # Bullish order block (for long entries)
+            is_valid = False
             if htf_structure == MarketStructure.BULLISH:
-                # Last bearish candle before strong bullish move
-                is_bearish = curr['close'] < curr['open']
-                next_bullish = sum(1 for c in next_candles if c['close'] > c['open']) >= 2
-                
-                if is_bearish and next_bullish:
-                    ob = OrderBlock(
-                        high=curr['high'],
-                        low=curr['low'],
-                        timestamp=curr.get('time', curr.get('timestamp', 0)),
-                        timeframe="5M",
-                        strength=0.8
-                    )
-                    order_blocks.append(ob)
-            
-            # Bearish order block (for short entries)
+                is_valid = self._is_valid_bullish_ob(curr, next_candles)
             elif htf_structure == MarketStructure.BEARISH:
-                # Last bullish candle before strong bearish move
-                is_bullish = curr['close'] > curr['open']
-                next_bearish = sum(1 for c in next_candles if c['close'] < c['open']) >= 2
-                
-                if is_bullish and next_bearish:
-                    ob = OrderBlock(
-                        high=curr['high'],
-                        low=curr['low'],
-                        timestamp=curr.get('time', curr.get('timestamp', 0)),
-                        timeframe="5M",
-                        strength=0.8
-                    )
-                    order_blocks.append(ob)
+                is_valid = self._is_valid_bearish_ob(curr, next_candles)
+            
+            if is_valid:
+                order_blocks.append(self._create_order_block(curr))
         
         return order_blocks
     
@@ -352,46 +346,81 @@ class EnhancedSMCStrategy:
         
         return False
     
-    def generate_signal(
-        self,
-        candles_5m: List[dict],
-        candles_htf: List[dict]
-    ) -> Optional[TradingSignal]:
-        """
-        Generate trading signal based on the complete trading plan.
+    def _check_liquidity_swept(self, candles_5m: List[dict], liquidity_pools: List) -> bool:
+        """Check if any liquidity pool has been swept."""
+        if not liquidity_pools:
+            return True  # No pools to sweep
         
-        Steps:
-        1. HTF structure (4H/1H)
-        2. Find 5M order blocks aligned with HTF
-        3. Check 79% Fib confluence
-        4. Detect FVG and breaker blocks
-        5. Confirm BoS + ChoCH
-        6. Check liquidity sweeps
-        7. Pair-specific rules
-        8. If all conditions met → Generate signal
-        """
+        current_price = candles_5m[-1]['close']
+        for pool in liquidity_pools:
+            if pool.is_high and current_price > pool.level:
+                return True
+            elif not pool.is_high and current_price < pool.level:
+                return True
+        return False
+    
+    def _validate_sl_distance(self, entry_price: float, stop_loss: float, min_points: int = 50, max_points: int = 120) -> bool:
+        """Validate stop loss is within acceptable range."""
+        sl_distance = abs(entry_price - stop_loss)
+        sl_points = sl_distance / 0.0001
+        return min_points <= sl_points <= max_points
+    
+    def _build_signal_params(self, htf_structure: MarketStructure, selected_ob: OrderBlock, 
+                             current_price: float) -> Optional[dict]:
+        """Build entry, SL, TP parameters based on market structure."""
+        is_bullish = htf_structure == MarketStructure.BULLISH
+        
+        direction = "BUY" if is_bullish else "SELL"
+        entry_price = current_price
+        
+        if is_bullish:
+            stop_loss = selected_ob.low * 0.9995
+        else:
+            stop_loss = selected_ob.high * 1.0005
+        
+        if not self._validate_sl_distance(entry_price, stop_loss):
+            return None
+        
+        sl_distance = abs(entry_price - stop_loss)
+        rr_ratio = 4.0
+        
+        if is_bullish:
+            take_profit = entry_price + (sl_distance * rr_ratio)
+        else:
+            take_profit = entry_price - (sl_distance * rr_ratio)
+        
+        return {
+            'direction': direction,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'rr_ratio': rr_ratio,
+            'sl_distance': sl_distance
+        }
+    
+    def generate_signal(self, candles_5m: List[dict], candles_htf: List[dict]) -> Optional[TradingSignal]:
+        """Generate trading signal based on the complete trading plan."""
         conditions_met = []
         
-        # Check if we can trade today
+        # Check trading limits
         if self.trades_today >= self.max_trades_per_day or self.target_reached:
             return None
         
         # Step 1: HTF Structure
         htf_structure = self.determine_htf_structure(candles_htf)
         if htf_structure == MarketStructure.RANGING:
-            return None  # No trade in ranging market
+            return None
         conditions_met.append(f"HTF Structure: {htf_structure.value}")
         
         # Step 2: Find 5M Order Blocks
         order_blocks = self.find_order_blocks_5m(candles_5m, htf_structure)
         if not order_blocks:
             return None
-        selected_ob = order_blocks[-1]  # Use most recent
+        selected_ob = order_blocks[-1]
         conditions_met.append("Order Block found on 5M")
         
         # Step 3: 79% Fib Confluence
-        fib_confluence = self.check_79_fib_confluence(selected_ob, candles_5m)
-        if not fib_confluence:
+        if not self.check_79_fib_confluence(selected_ob, candles_5m):
             return None
         conditions_met.append("79% Fib confluence confirmed")
         
@@ -410,83 +439,38 @@ class EnhancedSMCStrategy:
         
         # Step 6: Liquidity Check
         liquidity_pools = self.detect_liquidity_pools(candles_5m)
+        if not self._check_liquidity_swept(candles_5m, liquidity_pools):
+            return None
         if liquidity_pools:
-            # Wait for sweep if liquidity exists
-            current_price = candles_5m[-1]['close']
-            swept = False
-            for pool in liquidity_pools:
-                if pool.is_high and current_price > pool.level:
-                    swept = True
-                elif not pool.is_high and current_price < pool.level:
-                    swept = True
-            
-            if not swept:
-                return None  # Wait for sweep
             conditions_met.append("Liquidity swept")
         
         # Step 7: Pair-Specific Rules
         if not self.is_gold:
-            # EU/GU: Check Asian session sweep
-            asian_sweep = self.check_asian_session_sweep(candles_5m, htf_structure)
-            if not asian_sweep:
+            if not self.check_asian_session_sweep(candles_5m, htf_structure):
                 return None
             conditions_met.append("Asian session sweep detected")
         else:
-            # Gold: Use 30M zones (would need 30M data - simplified here)
             conditions_met.append("Gold: Following trend")
         
-        # Step 8: Generate Signal
+        # Step 8: Build Signal
         current_price = candles_5m[-1]['close']
+        params = self._build_signal_params(htf_structure, selected_ob, current_price)
+        if not params:
+            return None
         
-        if htf_structure == MarketStructure.BULLISH:
-            direction = "BUY"
-            entry_price = current_price
-            stop_loss = selected_ob.low * 0.9995  # Below OB
-            
-            # Calculate SL distance in points (for forex, 1 point = 0.0001)
-            sl_distance = abs(entry_price - stop_loss)
-            sl_points = sl_distance / 0.0001
-            
-            # Ensure SL is between 50-120 points
-            if sl_points < 50 or sl_points > 120:
-                return None
-            
-            # Target: 1:3 to 1:5 RR
-            rr_ratio = 4.0  # Aim for 1:4
-            take_profit = entry_price + (sl_distance * rr_ratio)
-            
-        else:  # BEARISH
-            direction = "SELL"
-            entry_price = current_price
-            stop_loss = selected_ob.high * 1.0005  # Above OB
-            
-            sl_distance = abs(stop_loss - entry_price)
-            sl_points = sl_distance / 0.0001
-            
-            if sl_points < 50 or sl_points > 120:
-                return None
-            
-            rr_ratio = 4.0
-            take_profit = entry_price - (sl_distance * rr_ratio)
-        
-        # Calculate confidence
-        confidence = len(conditions_met) / 8.0  # Max 8 conditions
-        
-        signal = TradingSignal(
-            direction=direction,
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            risk_reward=rr_ratio,
-            confidence=confidence,
+        return TradingSignal(
+            direction=params['direction'],
+            entry_price=params['entry_price'],
+            stop_loss=params['stop_loss'],
+            take_profit=params['take_profit'],
+            risk_reward=params['rr_ratio'],
+            confidence=len(conditions_met) / 8.0,
             order_block=selected_ob,
             htf_structure=htf_structure,
-            session=SessionType.LONDON,  # Would need actual session detection
+            session=SessionType.LONDON,
             conditions_met=conditions_met,
             timestamp=candles_5m[-1].get('time', candles_5m[-1].get('timestamp', 0))
         )
-        
-        return signal
     
     def analyze(self, candles_5m: List[dict], candles_htf: List[dict] = None) -> Optional[Dict]:
         """

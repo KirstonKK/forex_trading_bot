@@ -124,6 +124,12 @@
             margin-bottom: 20px;
         }
 
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
         /* Sessions Panel */
         .sessions-panel {
             background: var(--bg-secondary);
@@ -290,7 +296,6 @@
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
             border-radius: 2px;
-            margin-bottom: 20px;
         }
 
         .signal-card {
@@ -418,6 +423,99 @@
             color: var(--text-secondary);
         }
 
+        /* Advisory Sentiment Panel */
+        .advisory-panel {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 2px;
+            margin-bottom: 20px;
+            padding: 20px;
+        }
+
+        .advisory-panel .panel-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .advisory-note {
+            font-size: 10px;
+            color: var(--accent-blue);
+            background: rgba(0, 136, 221, 0.1);
+            padding: 4px 8px;
+            border-radius: 2px;
+            display: inline-block;
+            margin-bottom: 15px;
+        }
+
+        .sentiment-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .sentiment-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 2px;
+            padding: 15px;
+            text-align: center;
+        }
+
+        .sentiment-card.bullish {
+            border-left: 3px solid var(--accent-green);
+        }
+
+        .sentiment-card.bearish {
+            border-left: 3px solid var(--accent-red);
+        }
+
+        .sentiment-card.neutral {
+            border-left: 3px solid var(--text-secondary);
+        }
+
+        .sentiment-pair {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .sentiment-score {
+            font-size: 18px;
+            font-weight: 600;
+            font-family: 'SF Mono', monospace;
+        }
+
+        .sentiment-score.positive {
+            color: var(--accent-green);
+        }
+
+        .sentiment-score.negative {
+            color: var(--accent-red);
+        }
+
+        .sentiment-bias {
+            font-size: 10px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-top: 5px;
+        }
+
+        .market-summary {
+            font-size: 12px;
+            color: var(--text-secondary);
+            padding: 10px;
+            background: var(--bg-tertiary);
+            border-radius: 2px;
+        }
+
+        .events-warning {
+            font-size: 11px;
+            color: var(--accent-yellow);
+            margin-top: 10px;
+        }
+
         .empty-state {
             text-align: center;
             padding: 60px 20px;
@@ -478,7 +576,12 @@
                 <div class="panel-title">Trading Sessions (GMT)</div>
                 <div class="session-item" id="sessionAsian">
                     <div class="session-name">ASIAN</div>
-                    <div class="session-time">00:00 - 09:00</div>
+                    <div class="session-time">00:00 - 08:00</div>
+                    <div class="session-status">CLOSED</div>
+                </div>
+                <div class="session-item" id="sessionPreLondon">
+                    <div class="session-name">PRE-LONDON</div>
+                    <div class="session-time">07:00 - 08:00</div>
                     <div class="session-status">CLOSED</div>
                 </div>
                 <div class="session-item" id="sessionLondon">
@@ -486,56 +589,68 @@
                     <div class="session-time">08:00 - 16:00</div>
                     <div class="session-status">CLOSED</div>
                 </div>
-                <div class="session-item" id="sessionNY">
-                    <div class="session-name">NEW YORK</div>
-                    <div class="session-time">13:00 - 21:00</div>
-                    <div class="session-status">CLOSED</div>
-                </div>
                 <div class="session-item" id="sessionOverlap">
                     <div class="session-name">OVERLAP</div>
                     <div class="session-time">13:00 - 16:00</div>
                     <div class="session-status">CLOSED</div>
                 </div>
-            </div>
-
-            <!-- Market Data Panel -->
-            <div class="market-panel">
-                <div class="panel-header">
-                    <div class="panel-title">Market Data</div>
-                    <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+                <div class="session-item" id="sessionNY">
+                    <div class="session-name">NEW YORK</div>
+                    <div class="session-time">13:00 - 21:00</div>
+                    <div class="session-status">CLOSED</div>
                 </div>
-                <table class="market-table">
-                    <thead>
-                        <tr>
-                            <th>PAIR</th>
-                            <th>PRICE</th>
-                            <th>CHANGE</th>
-                            <th>HTF STRUCTURE</th>
-                            <th>SIGNAL</th>
-                            <th>LAST UPDATE</th>
-                        </tr>
-                    </thead>
-                    <tbody id="marketTableBody">
-                        <tr>
-                            <td colspan="6" class="empty-state">
-                                <div class="empty-state-icon">⏳</div>
-                                Loading market data...
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
 
-        <!-- Signals Panel -->
-        <div class="signals-panel">
-            <div class="panel-header">
-                <div class="panel-title">Active Signals</div>
+                <!-- Advisory Sentiment in Sidebar -->
+                <div style="margin-top: 20px;">
+                    <div class="panel-title">Market Sentiment</div>
+                    <div class="advisory-note">ℹ️ Advisory Only</div>
+                    <div id="sidebarSentiment">
+                        <div style="color: var(--text-secondary); font-size: 11px;">Loading...</div>
+                    </div>
+                </div>
             </div>
-            <div id="signalsContainer">
-                <div class="no-signals">
-                    <div class="no-signals-icon">📊</div>
-                    <div>No signals detected. Monitoring for ICT/SMC setups...</div>
+
+            <!-- Main Content Area -->
+            <div class="main-content">
+                <!-- Market Data Panel -->
+                <div class="market-panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Market Data</div>
+                        <button class="refresh-btn" onclick="refreshData()">Refresh</button>
+                    </div>
+                    <table class="market-table">
+                        <thead>
+                            <tr>
+                                <th>PAIR</th>
+                                <th>PRICE</th>
+                                <th>CHANGE</th>
+                                <th>HTF STRUCTURE</th>
+                                <th>SIGNAL</th>
+                                <th>LAST UPDATE</th>
+                            </tr>
+                        </thead>
+                        <tbody id="marketTableBody">
+                            <tr>
+                                <td colspan="6" class="empty-state">
+                                    <div class="empty-state-icon">⏳</div>
+                                    Loading market data...
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Signals Panel - Now directly below Market Data -->
+                <div class="signals-panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Active Signals</div>
+                    </div>
+                    <div id="signalsContainer">
+                        <div class="no-signals">
+                            <div class="no-signals-icon">📊</div>
+                            <div>No signals detected. Monitoring for ICT/SMC setups...</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -562,24 +677,31 @@
         function updateSessions() {
             const now = new Date();
             const hours = now.getUTCHours();
+            const dayOfWeek = now.getUTCDay(); // 0 = Sunday, 6 = Saturday
+
+            // Forex markets closed on weekends (Saturday full day, Sunday until ~22:00 UTC)
+            const isWeekend = (dayOfWeek === 6) || (dayOfWeek === 0 && hours < 22);
 
             const sessions = {
-                asian: { start: 0, end: 9, element: 'sessionAsian' },
+                asian: { start: 0, end: 8, element: 'sessionAsian' },
+                preLondon: { start: 7, end: 8, element: 'sessionPreLondon' },
                 london: { start: 8, end: 16, element: 'sessionLondon' },
-                ny: { start: 13, end: 21, element: 'sessionNY' },
-                overlap: { start: 13, end: 16, element: 'sessionOverlap' }
+                overlap: { start: 13, end: 16, element: 'sessionOverlap' },
+                ny: { start: 13, end: 21, element: 'sessionNY' }
             };
 
             Object.entries(sessions).forEach(([name, session]) => {
                 const element = document.getElementById(session.element);
-                const isActive = hours >= session.start && hours < session.end;
+                if (!element) return;
+
+                const isActive = !isWeekend && hours >= session.start && hours < session.end;
 
                 if (isActive) {
                     element.classList.add('active');
                     element.querySelector('.session-status').textContent = 'OPEN';
                 } else {
                     element.classList.remove('active');
-                    element.querySelector('.session-status').textContent = 'CLOSED';
+                    element.querySelector('.session-status').textContent = isWeekend ? 'WEEKEND' : 'CLOSED';
                 }
             });
         }
@@ -601,15 +723,22 @@
                 const dataResponse = await fetch('/data');
                 const marketData = await dataResponse.json();
 
-                // Fetch signals
+                // Fetch current signals
                 const signalsResponse = await fetch('/signals');
                 const signalsData = await signalsResponse.json();
+
+                // Fetch signal history (pending signals persist until executed)
+                const historyResponse = await fetch('/signals/history');
+                const historyData = await historyResponse.json();
 
                 // Update market table
                 updateMarketTable(marketData.data, signalsData.signals);
 
-                // Update signals panel
-                updateSignalsPanel(signalsData.signals);
+                // Update signals panel with pending signals from server
+                updateSignalsPanel(signalsData.signals, historyData.pending || []);
+
+                // Update stats - show pending signal count
+                document.getElementById('signalsToday').textContent = historyData.pending_count || 0;
 
                 // Update stats
                 let dataPointsCount = 0;
@@ -664,78 +793,218 @@
             }).join('');
         }
 
-        function updateSignalsPanel(signals) {
+        function updateSignalsPanel(signals, serverHistory = []) {
             const container = document.getElementById('signalsContainer');
+
+            // Merge current active signals with server history
             const activeSignals = Object.entries(signals).filter(([pair, signal]) =>
                 signal.direction && signal.direction !== 'no_setup'
             );
 
-            if (activeSignals.length === 0) {
+            // Use server history if available, otherwise show "no signals"
+            const allSignals = serverHistory.length > 0 ? serverHistory : [];
+
+            if (activeSignals.length === 0 && allSignals.length === 0) {
                 container.innerHTML = `
                     <div class="no-signals">
                         <div class="no-signals-icon">📊</div>
                         <div>No signals detected. Monitoring for ICT/SMC setups...</div>
                     </div>
                 `;
-                document.getElementById('signalsToday').textContent = signalHistory.length;
+                document.getElementById('signalsToday').textContent = '0';
                 return;
             }
 
-            container.innerHTML = activeSignals.map(([pair, signal]) => {
-                // Add to history if new
-                const signalId = `${pair}-${Date.now()}`;
-                if (!signalHistory.find(s => s.pair === pair && s.direction === signal.direction)) {
-                    signalHistory.push({ pair, ...signal, time: new Date() });
-                }
+            // Show pending signals from server (these persist until executed)
+            let html = '';
 
-                const now = new Date();
-                const timeStr = now.toISOString().substr(11, 8);
+            // Pending signals from server history (these are the persistent ones)
+            allSignals.forEach(signal => {
+                const detectedTime = signal.detected_at ? new Date(signal.detected_at).toISOString().substr(11, 8) : 'N/A';
+                const isPending = signal.status === 'pending';
+                html += renderSignalCard(signal.symbol, signal, detectedTime, isPending);
+            });
 
-                return `
-                    <div class="signal-card">
-                        <div class="signal-header">
-                            <div class="signal-pair">${pair.replace('_', '/')}</div>
-                            <div class="signal-type ${signal.direction.toLowerCase()}">${signal.direction}</div>
-                        </div>
-                        <div class="signal-details">
-                            <div class="detail-item">
-                                <div class="detail-label">Entry</div>
-                                <div class="detail-value">${signal.entry_price?.toFixed(5) || '-'}</div>
-                            </div>
-                            <div class="detail-item">
-                                <div class="detail-label">Stop Loss</div>
-                                <div class="detail-value">${signal.stop_loss?.toFixed(5) || '-'}</div>
-                            </div>
-                            <div class="detail-item">
-                                <div class="detail-label">Take Profit</div>
-                                <div class="detail-value">${signal.take_profit?.toFixed(5) || '-'}</div>
-                            </div>
-                            <div class="detail-item">
-                                <div class="detail-label">Risk/Reward</div>
-                                <div class="detail-value">1:${signal.risk_reward?.toFixed(1) || '-'}</div>
-                            </div>
-                            <div class="detail-item">
-                                <div class="detail-label">Confidence</div>
-                                <div class="detail-value">${((signal.confidence || 0) * 100).toFixed(0)}%</div>
-                            </div>
-                        </div>
-                        <div class="signal-time">Detected at ${timeStr} GMT</div>
+            container.innerHTML = html || `
+                <div class="no-signals">
+                    <div class="no-signals-icon">📊</div>
+                    <div>No signals detected. Monitoring for ICT/SMC setups...</div>
+                </div>
+            `;
+
+            document.getElementById('signalsToday').textContent = allSignals.length;
+        }
+
+        function renderSignalCard(pair, signal, timeStr, isPending) {
+            const statusLabel = isPending ? '🟡 PENDING' : (signal.status === 'executed' ? '✅ EXECUTED' : '⚪ CANCELLED');
+            const cardStyle = isPending ? 'border-left: 3px solid var(--accent-yellow);' : 'opacity: 0.6;';
+            const signalId = signal.id || '';
+
+            // Price note for futures (Gold)
+            const priceNote = signal.price_note ? `
+                <div style="font-size: 10px; color: var(--accent-yellow); background: rgba(255, 170, 0, 0.1); padding: 4px 8px; border-radius: 2px; margin-top: 8px;">
+                    ⚠️ ${signal.price_note}
+                </div>
+            ` : '';
+
+            const actionButtons = isPending && signalId ? `
+                <div style="display: flex; gap: 8px; margin-top: 10px;">
+                    <button onclick="executeSignal('${signalId}')" style="flex: 1; padding: 8px; background: var(--accent-green); color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                        ✅ EXECUTED
+                    </button>
+                    <button onclick="cancelSignal('${signalId}')" style="flex: 1; padding: 8px; background: var(--accent-red); color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">
+                        ❌ CANCEL
+                    </button>
+                </div>
+            ` : '';
+
+            return `
+                <div class="signal-card" style="${cardStyle}">
+                    <div class="signal-header">
+                        <div class="signal-pair">${pair.replace('_', '/')}</div>
+                        <div class="signal-type ${(signal.direction || signal.type || '').toLowerCase()}">${signal.direction || signal.type || 'N/A'}</div>
                     </div>
-                `;
-            }).join('');
+                    <div style="font-size: 10px; color: var(--text-secondary); margin-bottom: 8px;">${statusLabel} - ${signal.setup_type || 'Unknown Setup'}</div>
+                    <div class="signal-details">
+                        <div class="detail-item">
+                            <div class="detail-label">Entry</div>
+                            <div class="detail-value">${signal.entry_price?.toFixed(5) || '-'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Stop Loss</div>
+                            <div class="detail-value">${signal.stop_loss?.toFixed(5) || '-'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Take Profit</div>
+                            <div class="detail-value">${signal.take_profit?.toFixed(5) || '-'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Risk/Reward</div>
+                            <div class="detail-value">1:${signal.risk_reward?.toFixed(1) || '-'}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Confidence</div>
+                            <div class="detail-value">${((signal.confidence || 0) * 100).toFixed(0)}%</div>
+                        </div>
+                    </div>
+                    <div class="signal-time">Detected at ${timeStr} GMT</div>
+                    ${priceNote}
+                    ${actionButtons}
+                </div>
+            `;
+        }
 
-            document.getElementById('signalsToday').textContent = signalHistory.length;
+        async function executeSignal(signalId) {
+            try {
+                const response = await fetch(`/signals/execute/${signalId}`, { method: 'POST' });
+                const data = await response.json();
+                if (data.status === 'success') {
+                    alert('✅ Signal marked as executed!');
+                    refreshData();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            } catch (error) {
+                console.error('Error executing signal:', error);
+            }
+        }
+
+        async function cancelSignal(signalId) {
+            if (confirm('Cancel this signal?')) {
+                try {
+                    const response = await fetch(`/signals/cancel/${signalId}`, { method: 'POST' });
+                    const data = await response.json();
+                    if (data.status === 'success') {
+                        alert('❌ Signal cancelled');
+                        refreshData();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                } catch (error) {
+                    console.error('Error cancelling signal:', error);
+                }
+            }
         }
 
         // Initialize
         updateGMTTime();
         updateSessions();
         refreshData();
+        refreshSentiment();
 
         // Update intervals
         setInterval(updateGMTTime, 1000);
         setInterval(updateSessions, 60000);
         setInterval(refreshData, 10000);
+        setInterval(refreshSentiment, 60000); // Update sentiment every minute
+
+        // Fetch and display advisory sentiment
+        async function refreshSentiment() {
+            try {
+                const response = await fetch('/advisory/sentiment');
+                const data = await response.json();
+
+                const container = document.getElementById('sidebarSentiment');
+
+                if (data.status === 'unavailable') {
+                    container.innerHTML = `
+                        <div style="color: var(--text-secondary); font-size: 10px;">
+                            Not configured<br>
+                            <span style="opacity: 0.7;">Run with Neo4j for sentiment</span>
+                        </div>
+                    `;
+                    return;
+                }
+
+                if (data.context && data.context.pairs) {
+                    const pairs = data.context.pairs;
+                    let html = '';
+
+                    Object.entries(pairs).forEach(([pair, info]) => {
+                        const score = info.score || 0;
+                        const bias = info.bias || 'neutral';
+                        const icon = score > 0.2 ? '🟢' : score < -0.2 ? '🔴' : '⚪';
+                        const scoreClass = score > 0 ? 'positive' : score < 0 ? 'negative' : '';
+
+                        html += `
+                            <div style="margin-bottom: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 2px;">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span>${icon} ${pair}</span>
+                                    <span class="sentiment-score ${scoreClass}" style="font-size: 12px;">
+                                        ${score >= 0 ? '+' : ''}${score.toFixed(2)}
+                                    </span>
+                                </div>
+                                <div style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase;">
+                                    ${bias.replace('_', ' ')}
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    // Add market summary
+                    if (data.context.market_summary) {
+                        html += `
+                            <div style="margin-top: 10px; font-size: 10px; color: var(--text-secondary);">
+                                ${data.context.market_summary}
+                            </div>
+                        `;
+                    }
+
+                    // Add high impact events warning
+                    if (data.context.high_impact_events && data.context.high_impact_events.length > 0) {
+                        html += `
+                            <div class="events-warning" style="margin-top: 10px;">
+                                ⚠️ ${data.context.high_impact_events.length} high-impact event(s)
+                            </div>
+                        `;
+                    }
+
+                    container.innerHTML = html;
+                }
+            } catch (error) {
+                console.log('Sentiment fetch error (non-critical):', error);
+            }
+        }
     </script>
 </body>
 

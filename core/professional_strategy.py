@@ -205,63 +205,60 @@ class ProfessionalStrategy:
         
         return True
     
+    def _get_zone_boundaries(self, candles: List[dict], ob: OrderBlock5M) -> Tuple[float, float]:
+        """Get zone high/low from 30M candles or order block."""
+        candles_30m = self.filters.get_timeframe_data(candles, 30)
+        if len(candles_30m) >= 2:
+            return max(c['high'] for c in candles_30m[-2:]), min(c['low'] for c in candles_30m[-2:])
+        return ob.high, ob.low
+    
+    def _get_daily_target(self, candles: List[dict], direction: str) -> Optional[float]:
+        """Get PDH/PDL as target."""
+        self.filters.update_daily_levels(candles)
+        current_date = datetime.fromtimestamp(candles[-1]['timestamp'], tz=timezone.utc).date()
+        
+        if current_date not in self.filters.previous_day_levels:
+            return None
+        
+        levels = self.filters.previous_day_levels[current_date]
+        return levels.pdh if direction == 'long' else levels.pdl
+    
+    def _calculate_stop_loss(self, entry: float, zone_val: float, direction: str, 
+                             pip_value: float) -> Optional[Tuple[float, float]]:
+        """Calculate SL with 50-150 pip bounds."""
+        buffer = 0.998 if direction == 'long' else 1.002
+        stop_loss = zone_val * buffer
+        sl_distance = abs(entry - stop_loss)
+        sl_pips = sl_distance / pip_value
+        
+        if sl_pips < 50:
+            offset = 50 * pip_value
+            stop_loss = entry - offset if direction == 'long' else entry + offset
+        elif sl_pips > 150:
+            return None
+        
+        return stop_loss, abs(entry - stop_loss)
+
     def calculate_sl_tp(self, entry: float, ob: OrderBlock5M, candles: List[dict], 
                         direction: str, symbol: str) -> Tuple[Optional[float], Optional[float], float]:
         """Calculate SL/TP with 50-120 pip SL, 1:3-1:5 RR."""
         pip_value = 0.10 if symbol == 'XAUUSD' else 0.0001
+        zone_high, zone_low = self._get_zone_boundaries(candles, ob)
         
-        candles_30m = self.filters.get_timeframe_data(candles, 30)
-        if len(candles_30m) >= 2:
-            zone_high = max(c['high'] for c in candles_30m[-2:])
-            zone_low = min(c['low'] for c in candles_30m[-2:])
-        else:
-            zone_high, zone_low = ob.high, ob.low
+        zone_val = zone_low if direction == 'long' else zone_high
+        sl_result = self._calculate_stop_loss(entry, zone_val, direction, pip_value)
+        if not sl_result:
+            return None, None, 0
         
-        if direction == 'long':
-            stop_loss = zone_low * 0.998
-            sl_distance = entry - stop_loss
-            sl_pips = sl_distance / pip_value
-            
-            if sl_pips < 50:
-                stop_loss = entry - (50 * pip_value)
-            elif sl_pips > 150:
-                return None, None, 0
-            
-            self.filters.update_daily_levels(candles)
-            current_date = datetime.fromtimestamp(candles[-1]['timestamp'], tz=timezone.utc).date()
-            
-            if current_date in self.filters.previous_day_levels:
-                pdh = self.filters.previous_day_levels[current_date].pdh
-                take_profit = pdh
-            else:
-                take_profit = entry + (sl_distance * 3)
-        else:
-            stop_loss = zone_high * 1.002
-            sl_distance = stop_loss - entry
-            sl_pips = sl_distance / pip_value
-            
-            if sl_pips < 50:
-                stop_loss = entry + (50 * pip_value)
-            elif sl_pips > 150:
-                return None, None, 0
-            
-            self.filters.update_daily_levels(candles)
-            current_date = datetime.fromtimestamp(candles[-1]['timestamp'], tz=timezone.utc).date()
-            
-            if current_date in self.filters.previous_day_levels:
-                pdl = self.filters.previous_day_levels[current_date].pdl
-                take_profit = pdl
-            else:
-                take_profit = entry - (sl_distance * 3)
+        stop_loss, sl_distance = sl_result
+        daily_target = self._get_daily_target(candles, direction)
+        take_profit = daily_target if daily_target else entry + (sl_distance * 3 * (1 if direction == 'long' else -1))
         
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)
         rr_ratio = reward / risk if risk > 0 else 0
         
-        if rr_ratio < 2.0:  # Lowered from 2.5
-            return None, None, 0
-        
-        return stop_loss, take_profit, rr_ratio
+        return (stop_loss, take_profit, rr_ratio) if rr_ratio >= 2.0 else (None, None, 0)
     
     def can_take_trade(self, timestamp: int) -> bool:
         """Check daily limits."""

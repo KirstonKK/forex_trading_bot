@@ -26,33 +26,38 @@ WEBHOOK_URL = "http://localhost:5000/webhook"
 WEBHOOK_SECRET = "your_secret_key_here"
 
 # Currency pairs to track
-PAIRS = ['EURUSD', 'GBPUSD']
+PAIRS = ['EURUSD', 'GBPUSD', 'XAUUSD']
 
-# Free forex API endpoint (ExchangeRate-API.com - no API key needed)
-API_BASE = "https://api.exchangerate-api.com/v4/latest/"
+# Use yfinance for real-time forex futures data
+import yfinance as yf
 
 def fetch_current_price(base_currency='EUR', quote_currency='USD'):
-    """Fetch current exchange rate."""
-    try:
-        url = f"{API_BASE}{base_currency}"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            rates = data.get('rates')
-            if rates is None:
-                logger.error("API response missing 'rates' key")
-                return None
-            rate = rates.get(quote_currency)
-            return rate
-        else:
-            logger.warning(f"API returned {response.status_code}")
-            return None
-    except requests.RequestException as e:
-        logger.error(f"Network error fetching price: {e}")
+    """Fetch real-time forex price from yfinance futures."""
+    # Map to futures contracts for real-time data
+    pair = f"{base_currency}{quote_currency}"
+    symbol_map = {
+        'EURUSD': '6E=F',   # Euro futures
+        'GBPUSD': '6B=F',   # British Pound futures
+        'USDJPY': '6J=F',   # Yen futures
+        'AUDUSD': '6A=F',   # AUD futures
+        'XAUUSD': 'GC=F',   # Gold futures
+    }
+    
+    ticker_symbol = symbol_map.get(pair)
+    if not ticker_symbol:
         return None
-    except (ValueError, KeyError) as e:
-        logger.error(f"Invalid API response: {e}")
+    
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        # Get latest data
+        hist = ticker.history(period='1d', interval='1m')
+        if not hist.empty:
+            price = float(hist['Close'].iloc[-1])
+            return price
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error fetching {pair}: {e}")
         return None
 
 
@@ -77,23 +82,15 @@ def send_candle_to_webhook(symbol_name, candle, timeframe):
         "secret": WEBHOOK_SECRET,
         "symbol": symbol_name,
         "timeframe": timeframe,
-        "time": candle['time'],
-        "open": candle['open'],
-        "high": candle['high'],
-        "low": candle['low'],
-        "close": candle['close'],
-        "volume": candle['volume']
+        **candle  # Unpack all candle fields (time, open, high, low, close, volume)
     }
     
     try:
         response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
-        if response.status_code == 200:
-            return True
-        else:
-            logger.warning(f"Webhook returned {response.status_code}: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Error sending webhook: {e}")
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.warning(f"Webhook error for {symbol_name}: {e}")
         return False
 
 
@@ -115,7 +112,8 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
             'EURUSD': '6E=F',  # Euro futures
             'GBPUSD': '6B=F',  # British Pound futures
             'USDJPY': '6J=F',  # Japanese Yen futures
-            'AUDUSD': '6A=F'   # Australian Dollar futures
+            'AUDUSD': '6A=F',  # Australian Dollar futures
+            'XAUUSD': 'GC=F'   # Gold futures
         }
         
         ticker_symbol = symbol_map.get(symbol, symbol)
@@ -149,38 +147,46 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
 
 
 def initial_data_load():
-    """Load initial historical data from yfinance."""
+    """Load initial historical data from yfinance - 4H, 1H, 15M, 5M."""
     logger.info("Loading initial data (fetching REAL historical candles from yfinance)...")
+    logger.info("Timeframes: 4H, 1H, 15M, 5M")
     
     for pair in PAIRS:
         logger.info(f"Fetching data for {pair}...")
         
         # Fetch real historical data for each timeframe
         candles_5m = fetch_real_historical_data(pair, interval='5m', period='5d')
+        candles_15m = fetch_real_historical_data(pair, interval='15m', period='5d')
         candles_1h = fetch_real_historical_data(pair, interval='1h', period='1mo')
-        candles_4h = fetch_real_historical_data(pair, interval='1h', period='3mo')  # Use 1h for 4h (yfinance limitation)
+        candles_4h_raw = fetch_real_historical_data(pair, interval='1h', period='3mo')  # Aggregate to 4H
         
-        if not candles_5m or not candles_1h or not candles_4h:
+        if not candles_5m or not candles_15m or not candles_1h or not candles_4h_raw:
             logger.warning(f"Could not fetch complete data for {pair}, skipping...")
             continue
         
-        # Send 5M candles (keep last 60)
-        logger.info(f"  Sending {len(candles_5m[-60:])} real 5M candles...")
-        for candle in candles_5m[-60:]:
+        # Send 5M candles (keep last 100)
+        logger.info(f"  Sending {len(candles_5m[-100:])} real 5M candles...")
+        for candle in candles_5m[-100:]:
             send_candle_to_webhook(pair, candle, '5M')
-            time.sleep(0.02)
+            time.sleep(0.01)
         
-        # Send 1H candles (keep last 60)
-        logger.info(f"  Sending {len(candles_1h[-60:])} real 1H candles...")
-        for candle in candles_1h[-60:]:
+        # Send 15M candles (keep last 100)
+        logger.info(f"  Sending {len(candles_15m[-100:])} real 15M candles...")
+        for candle in candles_15m[-100:]:
+            send_candle_to_webhook(pair, candle, '15M')
+            time.sleep(0.01)
+        
+        # Send 1H candles (keep last 100)
+        logger.info(f"  Sending {len(candles_1h[-100:])} real 1H candles...")
+        for candle in candles_1h[-100:]:
             send_candle_to_webhook(pair, candle, '1H')
-            time.sleep(0.02)
+            time.sleep(0.01)
         
-        # Send 4H candles (aggregate from 1H, keep last 60)
-        logger.info("  Sending aggregated 4H candles from 1H data...")
+        # Send 4H candles (aggregate from 1H, keep last 100)
+        logger.info("  Aggregating and sending 4H candles...")
         candles_4h_agg = []
-        for i in range(0, len(candles_4h), 4):
-            chunk = candles_4h[i:i+4]
+        for i in range(0, len(candles_4h_raw), 4):
+            chunk = candles_4h_raw[i:i+4]
             if len(chunk) == 4:
                 candles_4h_agg.append({
                     'time': chunk[0]['time'],
@@ -191,18 +197,22 @@ def initial_data_load():
                     'volume': sum(c['volume'] for c in chunk)
                 })
         
-        for candle in candles_4h_agg[-60:]:
+        for candle in candles_4h_agg[-100:]:
             send_candle_to_webhook(pair, candle, '4H')
-            time.sleep(0.02)
+            time.sleep(0.01)
         
-        logger.info(f"✓ Completed {pair}")
+        logger.info(f"✓ Completed {pair} (4H:{len(candles_4h_agg[-100:])}, 1H:{len(candles_1h[-100:])}, 15M:{len(candles_15m[-100:])}, 5M:{len(candles_5m[-100:])})")
     
-    logger.info("Initial data load complete!")
+    logger.info("Initial data load complete! All timeframes loaded.")
 
 
 def poll_live_data():
-    """Poll for new prices and send to webhook."""
-    logger.info("Starting live polling (10-second intervals with real prices)...")
+    """Poll for new prices and send to webhook - ALL TIMEFRAMES."""
+    logger.info("Starting live polling with MULTI-TIMEFRAME updates...")
+    
+    last_15m_update = {}
+    last_1h_update = {}
+    last_4h_update = {}
     
     while True:
         try:
@@ -211,21 +221,62 @@ def poll_live_data():
                 base = pair[:3]
                 quote = pair[3:6]
                 
-                # Fetch current price
+                # Fetch current price from yfinance (real-time)
                 price = fetch_current_price(base, quote)
                 
                 if price:
                     logger.info(f"Current {pair}: {price:.5f}")
                     
-                    # Generate and send 5M candle
-                    candle = generate_candle_from_price(price, '5M')
+                    # Always send 5M candle (every poll)
+                    candle = generate_candle_from_price(price)
                     send_candle_to_webhook(pair, candle, '5M')
+                    
+                    now = time.time()
+                    
+                    # Fetch fresh 15M data every 2 minutes
+                    if pair not in last_15m_update or (now - last_15m_update[pair]) > 120:
+                        candles_15m = fetch_real_historical_data(pair, interval='15m', period='5d')
+                        if candles_15m:
+                            for c in candles_15m[-3:]:
+                                send_candle_to_webhook(pair, c, '15M')
+                            last_15m_update[pair] = now
+                            logger.info(f"  📊 Updated 15M data for {pair}")
+                    
+                    # Fetch fresh 1H data every 5 minutes
+                    if pair not in last_1h_update or (now - last_1h_update[pair]) > 300:
+                        candles_1h = fetch_real_historical_data(pair, interval='1h', period='5d')
+                        if candles_1h:
+                            for c in candles_1h[-3:]:
+                                send_candle_to_webhook(pair, c, '1H')
+                            last_1h_update[pair] = now
+                            logger.info(f"  📊 Updated 1H data for {pair}")
+                    
+                    # Fetch fresh 4H data every 20 minutes
+                    if pair not in last_4h_update or (now - last_4h_update[pair]) > 1200:
+                        candles_1h_for_4h = fetch_real_historical_data(pair, interval='1h', period='1mo')
+                        if candles_1h_for_4h:
+                            # Aggregate to 4H
+                            candles_4h = []
+                            for i in range(0, len(candles_1h_for_4h), 4):
+                                chunk = candles_1h_for_4h[i:i+4]
+                                if len(chunk) == 4:
+                                    candles_4h.append({
+                                        'time': chunk[0]['time'],
+                                        'open': chunk[0]['open'],
+                                        'high': max(c['high'] for c in chunk),
+                                        'low': min(c['low'] for c in chunk),
+                                        'close': chunk[-1]['close'],
+                                        'volume': sum(c['volume'] for c in chunk)
+                                    })
+                            for c in candles_4h[-3:]:
+                                send_candle_to_webhook(pair, c, '4H')
+                            last_4h_update[pair] = now
+                            logger.info(f"  📊 Updated 4H data for {pair}")
                 else:
                     logger.warning(f"Could not fetch price for {pair}")
             
-            # Wait 10 seconds before next poll
-            logger.info("Waiting 10 seconds for next update...")
-            time.sleep(10)
+            # Wait 5 seconds before next poll (faster updates)
+            time.sleep(5)
             
         except KeyboardInterrupt:
             logger.info("Stopping poller...")

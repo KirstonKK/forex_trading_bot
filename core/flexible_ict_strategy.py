@@ -98,14 +98,32 @@ class FlexibleICTStrategy:
     def __init__(self):
         self.filters = AdvancedFilters()
         self.trades_today = 0
+        self._last_rejection_reasons = []  # Track why signals were rejected
+        self._last_sweep_found = False  # Track if sweep was detected
+        self._last_bos_found = False    # Track if BoS was detected
         self.current_date = None
+        # Store multi-timeframe data
+        self.mtf_data = {}  # {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
+    
+    def set_mtf_data(self, mtf_data: Dict[str, List[dict]]):
+        """Set multi-timeframe data for analysis."""
+        self.mtf_data = mtf_data
+    
+    def get_htf_candles(self, timeframe: int = 240) -> List[dict]:
+        """Get HTF candles from stored MTF data."""
+        tf_map = {240: '4H', 60: '1H', 15: '15M', 5: '5M'}
+        tf_key = tf_map.get(timeframe, '4H')
+        return self.mtf_data.get(tf_key, [])
     
     def determine_htf_trend(self, candles: List[dict], timeframe: int = 240) -> TrendDirection:
-        """Determine HTF trend (4H or 1H)."""
-        if len(candles) < 50:
-            return TrendDirection.RANGING
+        """Determine HTF trend (4H or 1H) using actual HTF data."""
+        # Use actual MTF data if available
+        if self.mtf_data:
+            candles_htf = self.get_htf_candles(timeframe)
+        else:
+            # Fallback to deriving from base candles
+            candles_htf = self.filters.get_timeframe_data(candles, timeframe)
         
-        candles_htf = self.filters.get_timeframe_data(candles, timeframe)
         if len(candles_htf) < 20:
             return TrendDirection.RANGING
         
@@ -129,8 +147,13 @@ class FlexibleICTStrategy:
         return TrendDirection.RANGING
     
     def find_htf_zones(self, candles: List[dict], timeframe: int = 240) -> List[HTFZone]:
-        """Find HTF zones (4H or 1H supply/demand)."""
-        candles_htf = self.filters.get_timeframe_data(candles, timeframe)
+        """Find HTF zones (4H or 1H supply/demand) using actual MTF data."""
+        # Use actual MTF data if available
+        if self.mtf_data:
+            candles_htf = self.get_htf_candles(timeframe)
+        else:
+            candles_htf = self.filters.get_timeframe_data(candles, timeframe)
+        
         if len(candles_htf) < 30:
             return []
         
@@ -165,28 +188,41 @@ class FlexibleICTStrategy:
         return zones[-5:]  # Keep last 5 zones
     
     def find_order_blocks(self, candles: List[dict], timeframe: int = 5) -> List[OrderBlock]:
-        """Find order blocks on specified timeframe."""
-        candles_tf = self.filters.get_timeframe_data(candles, timeframe)
+        """
+        Find order blocks on specified timeframe using actual MTF data.
+        
+        ICT Order Block Definition:
+        - Bullish OB: Last BEARISH candle before a strong bullish move
+        - Bearish OB: Last BULLISH candle before a strong bearish move
+        """
+        # Use actual MTF data if available
+        if self.mtf_data:
+            candles_tf = self.get_htf_candles(timeframe)
+        elif timeframe == 5:
+            # For 5M, just use the input candles directly (they're already 5M)
+            candles_tf = candles
+        else:
+            candles_tf = self.filters.get_timeframe_data(candles, timeframe)
+        
         if len(candles_tf) < 20:
             return []
         
         order_blocks = []
-        for i in range(len(candles_tf) - 10, len(candles_tf) - 1):
-            if i < 2:
-                continue
-            
-            prev = candles_tf[i - 1]
+        # Look at last 30 candles
+        start_idx = max(2, len(candles_tf) - 30)
+        for i in range(start_idx, len(candles_tf) - 1):
             curr = candles_tf[i]
             next_c = candles_tf[i + 1]
             
-            # Bullish OB: strong up move after this candle
-            if (curr['close'] > curr['open'] and
-                next_c['close'] > curr['close'] * 1.002):
+            # Bullish OB: BEARISH candle followed by bullish candle that breaks above
+            if (curr['close'] < curr['open'] and  # Current is bearish
+                next_c['close'] > next_c['open'] and  # Next is bullish
+                next_c['close'] > curr['high']):  # Next breaks above current's high
                 
-                strength = (curr['close'] - curr['open']) / curr['open']
+                strength = (next_c['close'] - curr['low']) / curr['low']
                 ob = OrderBlock(
-                    high=curr['open'],
-                    low=curr['low'],
+                    high=curr['high'],  # OB high is the bearish candle's high
+                    low=curr['low'],     # OB low is the bearish candle's low
                     timestamp=curr['timestamp'],
                     direction='bullish',
                     timeframe=f"{timeframe}M",
@@ -194,14 +230,15 @@ class FlexibleICTStrategy:
                 )
                 order_blocks.append(ob)
             
-            # Bearish OB: strong down move after this candle
-            elif (curr['close'] < curr['open'] and
-                  next_c['close'] < curr['close'] * 0.998):
+            # Bearish OB: BULLISH candle followed by bearish candle that breaks below
+            elif (curr['close'] > curr['open'] and  # Current is bullish
+                  next_c['close'] < next_c['open'] and  # Next is bearish
+                  next_c['close'] < curr['low']):  # Next breaks below current's low
                 
-                strength = (curr['open'] - curr['close']) / curr['close']
+                strength = (curr['high'] - next_c['close']) / next_c['close']
                 ob = OrderBlock(
-                    high=curr['high'],
-                    low=curr['open'],
+                    high=curr['high'],  # OB high is the bullish candle's high
+                    low=curr['low'],     # OB low is the bullish candle's low
                     timestamp=curr['timestamp'],
                     direction='bearish',
                     timeframe=f"{timeframe}M",
@@ -212,8 +249,14 @@ class FlexibleICTStrategy:
         return sorted(order_blocks, key=lambda x: x.strength, reverse=True)[:5]
     
     def find_fvgs(self, candles: List[dict]) -> List[FVG]:
-        """Find Fair Value Gaps on 5M."""
-        candles_5m = self.filters.get_timeframe_data(candles, 5)
+        """Find Fair Value Gaps on 5M using actual MTF data."""
+        # Use actual MTF data if available
+        if self.mtf_data:
+            candles_5m = self.get_htf_candles(5)
+        else:
+            # Input candles are already 5M, use them directly
+            candles_5m = candles
+        
         if len(candles_5m) < 10:
             return []
         
@@ -242,6 +285,54 @@ class FlexibleICTStrategy:
                 ))
         
         return fvgs[-10:]  # Keep recent FVGs
+    
+    def is_in_liquidity_zone(self, candles: List[dict], current_price: float) -> bool:
+        """
+        Check if current price is IN a liquidity zone (EQUAL highs/lows cluster).
+        We should NOT enter trades when price is sitting in liquidity - wait for sweep.
+        
+        This checks for EQUAL highs/lows (within 3 pips of each other), not just any highs/lows.
+        
+        Returns:
+            True if price is at a significant liquidity pool (don't trade here)
+        """
+        if len(candles) < 30:
+            return False
+        
+        recent = candles[-30:]
+        highs = [c['high'] for c in recent]
+        lows = [c['low'] for c in recent]
+        
+        pip_value = 0.0001
+        eq_tolerance = 3 * pip_value  # 3 pips - for finding EQUAL levels
+        zone_tolerance = 5 * pip_value  # 5 pips - for price at zone
+        
+        # Find clusters of EQUAL highs (within 3 pips of each other)
+        for i in range(len(highs) - 2):
+            cluster_highs = [highs[i]]
+            for j in range(i + 1, len(highs)):
+                if abs(highs[j] - highs[i]) < eq_tolerance:
+                    cluster_highs.append(highs[j])
+            
+            # If we have 3+ equal highs AND price is near them, it's a liquidity zone
+            if len(cluster_highs) >= 3:
+                avg_level = sum(cluster_highs) / len(cluster_highs)
+                if abs(current_price - avg_level) < zone_tolerance:
+                    return True
+        
+        # Find clusters of EQUAL lows
+        for i in range(len(lows) - 2):
+            cluster_lows = [lows[i]]
+            for j in range(i + 1, len(lows)):
+                if abs(lows[j] - lows[i]) < eq_tolerance:
+                    cluster_lows.append(lows[j])
+            
+            if len(cluster_lows) >= 3:
+                avg_level = sum(cluster_lows) / len(cluster_lows)
+                if abs(current_price - avg_level) < zone_tolerance:
+                    return True
+        
+        return False
     
     def check_liquidity_sweep(self, candles: List[dict], symbol: str) -> Tuple[bool, str]:
         """Check for liquidity sweep (equal highs/lows or Asian session)."""
@@ -286,35 +377,79 @@ class FlexibleICTStrategy:
         return False, None
     
     def check_bos(self, candles: List[dict], direction: str) -> bool:
-        """Check Break of Structure."""
-        if len(candles) < 15:
+        """
+        Check Break of Structure - price has broken a swing point with DISPLACEMENT.
+        
+        For ICT: After liquidity sweep, we look for an IMPULSIVE BoS to confirm direction.
+        The break should be a strong candle (displacement), not a weak break.
+        """
+        if len(candles) < 20:
             return False
         
-        recent = candles[-15:]
-        current_price = candles[-1]['close']
+        # Look at larger window for BoS confirmation
+        recent = candles[-40:] if len(candles) >= 40 else candles
+        
+        # Calculate average candle size for comparison
+        avg_body = sum(abs(c['close'] - c['open']) for c in recent) / len(recent)
+        min_displacement = avg_body * 1.5  # Displacement should be 1.5x average
+        
+        # Find all swing points
+        swing_highs = []
+        swing_lows = []
+        
+        for i in range(3, len(recent) - 3):
+            # Swing high: higher than 2 candles on each side
+            is_swing_high = all(recent[i]['high'] >= recent[j]['high'] for j in range(i-2, i)) and \
+                           all(recent[i]['high'] >= recent[j]['high'] for j in range(i+1, min(i+3, len(recent))))
+            if is_swing_high:
+                swing_highs.append((i, recent[i]['high']))
+            
+            # Swing low: lower than 2 candles on each side
+            is_swing_low = all(recent[i]['low'] <= recent[j]['low'] for j in range(i-2, i)) and \
+                          all(recent[i]['low'] <= recent[j]['low'] for j in range(i+1, min(i+3, len(recent))))
+            if is_swing_low:
+                swing_lows.append((i, recent[i]['low']))
         
         if direction == 'long':
-            recent_high = max(c['high'] for c in recent[:-2])
-            return current_price > recent_high * 1.0005  # 0.05% break
+            # For bullish BoS: an IMPULSIVE candle breaks above swing high
+            for swing_idx, swing_high in swing_highs:
+                for j in range(swing_idx + 2, len(recent)):
+                    candle = recent[j]
+                    body_size = abs(candle['close'] - candle['open'])
+                    is_bullish = candle['close'] > candle['open']
+                    
+                    # Check for impulsive bullish break
+                    if is_bullish and candle['close'] > swing_high and body_size >= min_displacement:
+                        return True
+            return False
         else:
-            recent_low = min(c['low'] for c in recent[:-2])
-            return current_price < recent_low * 0.9995
+            # For bearish BoS: an IMPULSIVE candle breaks below swing low  
+            for swing_idx, swing_low in swing_lows:
+                for j in range(swing_idx + 2, len(recent)):
+                    candle = recent[j]
+                    body_size = abs(candle['close'] - candle['open'])
+                    is_bearish = candle['close'] < candle['open']
+                    
+                    # Check for impulsive bearish break
+                    if is_bearish and candle['close'] < swing_low and body_size >= min_displacement:
+                        return True
+            return False
     
     def check_choch(self, candles: List[dict], direction: str) -> bool:
-        """Check Change of Character."""
+        """Check Change of Character - momentum shift."""
         if len(candles) < 10:
             return False
         
         recent = candles[-10:]
         
         if direction == 'long':
-            # Looking for shift to higher lows
-            lows = [c['low'] for c in recent[-5:]]
-            return len(lows) >= 3 and lows[-1] > lows[-2] > lows[-3]
+            # Looking for higher low formation (just 2 consecutive higher lows)
+            lows = [c['low'] for c in recent[-4:]]
+            return len(lows) >= 2 and lows[-1] > lows[-2]
         else:
-            # Looking for shift to lower highs
-            highs = [c['high'] for c in recent[-5:]]
-            return len(highs) >= 3 and highs[-1] < highs[-2] < highs[-3]
+            # Looking for lower high formation
+            highs = [c['high'] for c in recent[-4:]]
+            return len(highs) >= 2 and highs[-1] < highs[-2]
     
     def check_fib_confluence(self, candles: List[dict], level: float, direction: str) -> bool:
         """Check if price is at 79% Fib retracement."""
@@ -351,45 +486,150 @@ class FlexibleICTStrategy:
     
     def try_option_1(self, candles: List[dict], symbol: str) -> Optional[Dict]:
         """
-        Option 1: HTF Bias + Liquidity Sweep + BoS
-        Requirements:
-        - Clear HTF trend (4H or 1H) ✅
-        - Liquidity sweep ✅
-        - BoS in direction of HTF ✅
+        Option 1: HTF Bias + Liquidity Sweep + BoS + FVG/OB Entry
+        
+        ICT Entry Model (High Win Rate Version):
+        1. HTF trend - BOTH 4H and 1H must agree (stronger filter) ✅
+        2. Liquidity sweep (took out highs/lows) ✅
+        3. BoS in direction of HTF ✅
+        4. ChoCH confirmation (momentum shift) ✅
+        5. Price taps into FRESH FVG or OB (entry zone) ✅
+        
+        We DON'T enter at the liquidity zone - we wait for price to
+        sweep, then come back to an FVG/OB for optimal entry.
         """
         confirmations = []
         
-        # 1. HTF Trend
+        # 1. HTF Trend - REQUIRE BOTH 4H AND 1H TO ALIGN for higher win rate
         htf_trend_4h = self.determine_htf_trend(candles, 240)
         htf_trend_1h = self.determine_htf_trend(candles, 60)
         
-        htf_trend = htf_trend_4h if htf_trend_4h != TrendDirection.RANGING else htf_trend_1h
-        
-        if htf_trend == TrendDirection.RANGING:
+        # Both timeframes must agree (no ranging allowed)
+        if htf_trend_4h == TrendDirection.RANGING or htf_trend_1h == TrendDirection.RANGING:
+            self._last_rejection_reasons.append("HTF ranging (no clear trend)")
             return None
         
-        confirmations.append("HTF_BIAS")
+        if htf_trend_4h != htf_trend_1h:
+            self._last_rejection_reasons.append(f"HTF conflict (4H={htf_trend_4h.value}, 1H={htf_trend_1h.value})")
+            return None  # Conflicting bias - skip
+        
+        htf_trend = htf_trend_4h  # Both agree
+        
+        confirmations.append("HTF_BIAS_ALIGNED")
         direction = 'long' if htf_trend == TrendDirection.BULLISH else 'short'
         
-        # 2. Liquidity Sweep
+        # 2. Liquidity Sweep (must have ALREADY happened)
         has_sweep, sweep_type = self.check_liquidity_sweep(candles, symbol)
+        if has_sweep:
+            self._last_sweep_found = True  # Track for stats
         if not has_sweep:
+            self._last_rejection_reasons.append("No liquidity sweep detected")
             return None
         
         # Ensure sweep aligns with direction
         if direction == 'long' and sweep_type != 'low':
+            self._last_rejection_reasons.append(f"Sweep direction mismatch (need low sweep for long)")
             return None
         if direction == 'short' and sweep_type != 'high':
+            self._last_rejection_reasons.append(f"Sweep direction mismatch (need high sweep for short)")
             return None
         
         confirmations.append("LIQUIDITY_SWEEP")
         
-        # 3. BoS
+        # 3. BoS (confirms reversal after sweep)
         has_bos = self.check_bos(candles, direction)
+        if has_bos:
+            self._last_bos_found = True  # Track for stats
         if not has_bos:
+            self._last_rejection_reasons.append("No Break of Structure after sweep")
             return None
         
         confirmations.append("BOS")
+        
+        # 4. ChoCH confirmation for extra confirmation (higher win rate)
+        has_choch = self.check_choch(candles, direction)
+        if has_choch:
+            confirmations.append("CHOCH")
+        
+        # 5. Price must be at FRESH FVG or OB for entry (not stale zones)
+        current_price = candles[-1]['close']
+        pip_value = 0.0001
+        tolerance = 10 * pip_value  # 10 pips tolerance (tighter for precision)
+        
+        # Find the swept level (liquidity that was taken)
+        # For SHORT: find the recent swing high that was swept
+        # For LONG: find the recent swing low that was swept
+        swept_level = self.find_sweep_level(candles, direction)
+        
+        # CRITICAL: Entry must be on the CORRECT side of the swept level
+        # For SHORT: entry must be BELOW the swept high (price retraced from above)
+        # For LONG: entry must be ABOVE the swept low (price retraced from below)
+        if swept_level:
+            buffer = 0.0005  # 5 pips buffer
+            if direction == 'short' and current_price > swept_level - buffer:
+                return None  # Price still too high, hasn't dropped below sweep level
+            if direction == 'long' and current_price < swept_level + buffer:
+                return None  # Price still too low, hasn't risen above sweep level
+        
+        # Find FVGs for entry - ICT RETRACEMENT ENTRY
+        # After sweep + BoS, price RETRACES into an FVG before continuing
+        # For SHORT: price retraces UP into a BULLISH FVG (gap from rally before drop)
+        # For LONG: price retraces DOWN into a BEARISH FVG (gap from drop before rally)
+        recent_candles = candles[-25:] if len(candles) >= 25 else candles
+        fvgs = self.find_fvgs(recent_candles)
+        entry_fvg = None
+        for fvg in fvgs:
+            # Bullish FVG = gap created by up-move → for SHORT entries (sell on retrace UP)
+            # Bearish FVG = gap created by down-move → for LONG entries (buy on retrace DOWN)
+            expected_fvg_dir = 'bullish' if direction == 'short' else 'bearish'
+            if fvg.direction == expected_fvg_dir:
+                if fvg.bottom - tolerance <= current_price <= fvg.top + tolerance:
+                    entry_fvg = fvg
+                    break
+        
+        # Find fresh OBs if no FVG - same retracement logic
+        # For SHORT: price retraces to BEARISH OB (bullish candle before drop - where sellers enter)
+        # For LONG: price retraces to BULLISH OB (bearish candle before rally - where buyers enter)
+        order_blocks = self.find_order_blocks(recent_candles, 5)
+        entry_ob = None
+        if not entry_fvg:
+            for ob in order_blocks:
+                expected_ob_dir = 'bearish' if direction == 'short' else 'bullish'
+                if ob.direction == expected_ob_dir:
+                    if ob.low - tolerance <= current_price <= ob.high + tolerance:
+                        entry_ob = ob
+                        break
+        
+        # Must have either FVG or OB entry
+        if not entry_fvg and not entry_ob:
+            self._last_rejection_reasons.append("Price not at FVG/OB entry zone")
+            return None  # Price not at entry zone yet, wait
+        
+        # CRITICAL: Check for REJECTION at the entry zone
+        # The candle should show a wick in the direction we want to trade
+        # This confirms the zone is being respected
+        current_candle = candles[-1]
+        body_size = abs(current_candle['close'] - current_candle['open'])
+        upper_wick = current_candle['high'] - max(current_candle['open'], current_candle['close'])
+        lower_wick = min(current_candle['open'], current_candle['close']) - current_candle['low']
+        
+        if direction == 'short':
+            # For SHORT: want upper wick (rejection from above) showing sellers stepping in
+            # Upper wick should be significant relative to body
+            if upper_wick < body_size * 0.5 and upper_wick < 0.0003:  # At least 3 pips wick or 50% of body
+                self._last_rejection_reasons.append("No rejection candle (need upper wick for short)")
+                return None  # No rejection, wait
+        else:
+            # For LONG: want lower wick (rejection from below) showing buyers stepping in
+            if lower_wick < body_size * 0.5 and lower_wick < 0.0003:
+                self._last_rejection_reasons.append("No rejection candle (need lower wick for long)")
+                return None  # No rejection, wait
+        
+        if entry_fvg:
+            confirmations.append("FVG_ENTRY")
+        if entry_ob:
+            confirmations.append("OB_ENTRY")
+        confirmations.append("REJECTION")
         
         return {
             'setup_type': SetupType.OPTION_1,
@@ -399,8 +639,8 @@ class FlexibleICTStrategy:
             'has_liquidity_sweep': True,
             'has_bos': True,
             'asian_sweep': sweep_type in ['low', 'high'],
-            'order_block': None,
-            'fvg': None,
+            'order_block': entry_ob,
+            'fvg': entry_fvg,
             'htf_zone': None
         }
     
@@ -479,25 +719,37 @@ class FlexibleICTStrategy:
     def try_option_3(self, candles: List[dict], symbol: str) -> Optional[Dict]:
         """
         Option 3: OB + FVG + Fib 79%
-        Requirements:
-        - 5M OB ✅
+        
+        Precision Entry Model:
+        - 5M OB exists ✅
         - FVG overlapping the OB ✅
         - 79% Fib retracement ✅
+        - Price is AT the OB/FVG zone (entry) ✅
         """
         confirmations = []
+        current_price = candles[-1]['close']
         
         # 1. Find 5M OBs
         order_blocks_5m = self.find_order_blocks(candles, 5)
         if not order_blocks_5m:
             return None
         
-        ob = order_blocks_5m[0]  # Best OB by strength
-        confirmations.append("OB_5M")
-        direction = 'long' if ob.direction == 'bullish' else 'short'
+        # Find OB that price is currently tapping
+        tapped_ob = None
+        for ob in order_blocks_5m:
+            if ob.low <= current_price <= ob.high:
+                tapped_ob = ob
+                break
         
-        # 2. Find FVGs
+        if not tapped_ob:
+            return None  # Price not at OB yet
+        
+        confirmations.append("OB_5M")
+        direction = 'long' if tapped_ob.direction == 'bullish' else 'short'
+        
+        # 2. Find FVGs overlapping this OB
         fvgs = self.find_fvgs(candles)
-        overlapping_fvg = self.check_ob_fvg_overlap(ob, fvgs)
+        overlapping_fvg = self.check_ob_fvg_overlap(tapped_ob, fvgs)
         
         if not overlapping_fvg:
             return None
@@ -505,7 +757,7 @@ class FlexibleICTStrategy:
         confirmations.append("FVG")
         
         # 3. Check 79% Fib
-        ob_mid = (ob.high + ob.low) / 2
+        ob_mid = (tapped_ob.high + tapped_ob.low) / 2
         has_fib = self.check_fib_confluence(candles, ob_mid, direction)
         
         if not has_fib:
@@ -525,129 +777,195 @@ class FlexibleICTStrategy:
             'has_bos': False,
             'has_choch': False,
             'asian_sweep': False,
-            'order_block': ob,
+            'order_block': tapped_ob,
             'fvg': overlapping_fvg,
             'htf_zone': None,
             'has_fib_confluence': True
         }
     
+    def find_sweep_level(self, candles: List[dict], direction: str) -> float:
+        """
+        Find the liquidity sweep level (swing high/low that was swept).
+        This is where we place SL - beyond the swept level.
+        
+        For SHORT: Find the recent swing high that was swept
+        For LONG: Find the recent swing low that was swept
+        """
+        if len(candles) < 30:
+            return None
+            
+        recent = candles[-40:] if len(candles) >= 40 else candles
+        
+        if direction == 'short':
+            # Find the highest swing high in recent candles
+            swing_high = max(c['high'] for c in recent[:-3])
+            return swing_high
+        else:
+            # Find the lowest swing low in recent candles
+            swing_low = min(c['low'] for c in recent[:-3])
+            return swing_low
+    
     def calculate_sl_tp(self, entry: float, setup_data: Dict, candles: List[dict], 
                         symbol: str) -> Tuple[Optional[float], Optional[float], float]:
-        """Calculate SL/TP based on setup type."""
+        """
+        Calculate SL/TP based on ICT principles:
+        - SL: Beyond the liquidity sweep level (swing high/low that was swept)
+        - TP: 3x the risk (1:3 RR)
+        """
         direction = setup_data['direction']
         pip_value = 0.10 if symbol == 'XAUUSD' else 0.0001
+        is_long = direction == 'long'
         
-        # Determine SL based on setup
-        if setup_data['order_block']:
-            ob = setup_data['order_block']
-            if direction == 'long':
-                stop_loss = ob.low * 0.998
+        # ICT SL Placement: Beyond the liquidity sweep level
+        # This is the swing high/low that was swept before entry
+        sweep_level = self.find_sweep_level(candles, direction)
+        
+        if sweep_level is None:
+            # Fallback to OB/zone based SL
+            if setup_data['order_block']:
+                ob = setup_data['order_block']
+                sweep_level = ob.low if is_long else ob.high
+            elif setup_data['htf_zone']:
+                zone = setup_data['htf_zone']
+                sweep_level = zone.low if is_long else zone.high
             else:
-                stop_loss = ob.high * 1.002
-        elif setup_data['htf_zone']:
-            zone = setup_data['htf_zone']
-            if direction == 'long':
-                stop_loss = zone.low * 0.998
-            else:
-                stop_loss = zone.high * 1.002
+                recent = candles[-20:]
+                sweep_level = min(c['low'] for c in recent) if is_long else max(c['high'] for c in recent)
+        
+        # Apply buffer beyond the sweep level (5 pips = 50 points)
+        buffer = 0.0005  # 5 pips buffer beyond sweep level
+        if is_long:
+            stop_loss = sweep_level - buffer  # SL below the swept low
         else:
-            # Use recent swing
-            recent = candles[-20:]
-            if direction == 'long':
-                stop_loss = min(c['low'] for c in recent) * 0.998
-            else:
-                stop_loss = max(c['high'] for c in recent) * 1.002
+            stop_loss = sweep_level + buffer  # SL above the swept high
         
         sl_distance = abs(entry - stop_loss)
-        sl_pips = sl_distance / pip_value
+        # Points = 5th decimal (0.00001), 1 pip = 10 points
+        point_value = 0.00001
+        sl_points = sl_distance / point_value
         
-        # Validate SL range (30-150 pips)
-        if sl_pips < 30 or sl_pips > 150:
+        # Validate SL range: Allow 50-500 points (5-50 pips)
+        # Wider range to accommodate proper SL placement beyond liquidity zones
+        if sl_points < 50 or sl_points > 500:
             return None, None, 0
         
-        # Calculate TP (aim for 1:3 minimum)
+        # Calculate TP with 1:2 RR - better win rate
+        # 1:2 RR requires 33% win rate to break even
         if direction == 'long':
-            take_profit = entry + (sl_distance * 3.0)
+            take_profit = entry + (sl_distance * 2.0)
         else:
-            take_profit = entry - (sl_distance * 3.0)
+            take_profit = entry - (sl_distance * 2.0)
         
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)
         rr_ratio = reward / risk if risk > 0 else 0
         
-        if rr_ratio < 2.5:
+        # Minimum 1.8 RR to ensure quality setups
+        if rr_ratio < 1.8:
             return None, None, 0
         
         return stop_loss, take_profit, rr_ratio
     
     def determine_risk_percentage(self, confirmation_count: int) -> float:
         """
-        Risk Management:
-        - 3 confirmations = full risk (1.0%)
-        - 2 confirmations = half risk (0.5%)
-        - 1 confirmation = no trade
+        Risk Management: 3 confirmations = 1.0%, 2 = 0.5%, <2 = no trade.
         """
-        if confirmation_count >= 3:
-            return 1.0
-        elif confirmation_count == 2:
-            return 0.5
-        else:
-            return 0.0
+        risk_map = {3: 1.0, 2: 0.5}
+        return risk_map.get(min(confirmation_count, 3), 0.0)
     
     def can_take_trade(self, timestamp: int) -> bool:
-        """Check daily limits (max 2 trades/day)."""
+        """Check daily limits (max 1 trade/day for highest quality)."""
         current_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
         
         if self.current_date != current_date:
             self.current_date = current_date
             self.trades_today = 0
         
-        if self.trades_today >= 2:
+        # Only 1 trade per day per pair for highest win rate
+        # The first setup of the day is usually the cleanest
+        if self.trades_today >= 1:
             return False
         
         can_trade, _ = self.filters.can_trade_now(timestamp)
         return can_trade
     
-    def analyze(self, candles: List[dict], symbol: str = 'EURUSD') -> Optional[Dict]:
+    def analyze(self, candles: List[dict], symbol: str = 'EURUSD', mtf_data: Dict[str, List[dict]] = None) -> Optional[Dict]:
         """
         Main analysis - Try all 3 options in order of priority.
         
         Priority for EU/GU: Option 1 > Option 2 > Option 3
         Priority for Gold: Option 2 > Option 1 > Option 3
+        
+        Args:
+            candles: Base candles (5M) for fallback
+            symbol: Trading pair
+            mtf_data: Multi-timeframe data {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
         """
-        if len(candles) < 100 or not self.can_take_trade(candles[-1]['timestamp']):
+        # Reset rejection reasons and stats flags
+        self._last_rejection_reasons = []
+        self._last_sweep_found = False
+        self._last_bos_found = False
+        
+        # Set multi-timeframe data if provided
+        if mtf_data:
+            self.set_mtf_data(mtf_data)
+        
+        # Use 5M candles as base for timestamp check
+        base_candles = mtf_data.get('5M', candles) if mtf_data else candles
+        
+        if len(base_candles) < 50:
+            self._last_rejection_reasons.append("Insufficient data (need 50+ candles)")
+            return None
+            
+        if not self.can_take_trade(base_candles[-1]['timestamp']):
+            self._last_rejection_reasons.append("Outside trading session (10:00-17:00 UTC)")
             return None
         
         # Determine priority based on symbol
+        # Focus on Option 1 only for EU/GU as it has the best win rate (55%+)
+        # Option 2 and 3 have lower win rates and drag down performance
         if symbol == 'XAUUSD':
-            options = [self.try_option_2, self.try_option_1, self.try_option_3]
-        else:  # EU, GU
-            options = [self.try_option_1, self.try_option_2, self.try_option_3]
+            options = [self.try_option_2, self.try_option_1]  # Gold prefers HTF zones
+        else:  # EU, GU - use Option 1 only for best win rate
+            options = [self.try_option_1]
         
         setup_data = None
         for option_func in options:
-            setup_data = option_func(candles, symbol)
+            setup_data = option_func(base_candles, symbol)
             if setup_data:
                 break
         
         if not setup_data:
+            # Rejection reasons already added by try_option methods
+            if not self._last_rejection_reasons:
+                self._last_rejection_reasons.append("No valid ICT setup pattern")
             return None
         
         # Check confirmation count
         confirmation_count = len(setup_data['confirmations'])
         if confirmation_count < 2:
+            self._last_rejection_reasons.append(f"Insufficient confirmations ({confirmation_count}/2 required)")
             return None  # Need at least 2 confirmations
         
         # Calculate risk percentage
         risk_percentage = self.determine_risk_percentage(confirmation_count)
         
         # Calculate SL/TP
-        entry_price = candles[-1]['close']
+        entry_price = base_candles[-1]['close']
+        
+        # Note: is_in_liquidity_zone check DISABLED for now
+        # Since Option 1 already requires entry at FVG/OB (not liquidity zone),
+        # this extra check was overly restrictive and blocking valid entries.
+        # The FVG/OB entry requirement IS the "not at liquidity zone" protection.
+        # if self.is_in_liquidity_zone(base_candles, entry_price):
+        #     return None  # Don't enter when sitting in liquidity zone
+        
         stop_loss, take_profit, rr_ratio = self.calculate_sl_tp(
-            entry_price, setup_data, candles, symbol
+            entry_price, setup_data, base_candles, symbol
         )
         
         if stop_loss is None:
+            self._last_rejection_reasons.append("Invalid SL/TP calculation (SL out of range)")
             return None
         
         # Calculate confidence
@@ -680,6 +998,17 @@ class FlexibleICTStrategy:
             'has_fib_confluence': setup_data.get('has_fib_confluence', False),
             'asian_sweep': setup_data['asian_sweep'],
             'confidence': confidence
+        }
+    
+    def get_last_rejection_reasons(self) -> List[str]:
+        """Get the reasons why the last analysis was rejected."""
+        return self._last_rejection_reasons if self._last_rejection_reasons else ['No valid ICT setup']
+    
+    def get_last_analysis_stats(self) -> dict:
+        """Get stats from the last analysis (sweeps, BoS detected)."""
+        return {
+            'sweep_found': self._last_sweep_found,
+            'bos_found': self._last_bos_found
         }
 
 

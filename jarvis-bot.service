@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis Forex Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=juujuaddy
+WorkingDirectory=/home/juujuaddy/forex_trading_bot
+ExecStart=/bin/bash /home/juujuaddy/forex_trading_bot/scripts/jarvis_service.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/juujuaddy/forex_trading_bot/logs/service.log
+StandardError=append:/home/juujuaddy/forex_trading_bot/logs/service_error.log
+
+[Install]
+WantedBy=multi-user.target

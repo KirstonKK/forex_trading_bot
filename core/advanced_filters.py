@@ -59,15 +59,19 @@ class AdvancedFilters:
         self.previous_day_levels = {}
         self.asian_ranges = {}
         
-        # High-impact news events (UTC hours)
+        # High-impact news events - ONLY checked on their actual days
+        # NFP: First Friday of month
+        # FOMC: 8 scheduled meetings per year (check externally)
+        # CPI/PPI: Mid-month (around 10th-15th)
+        # For now, we'll only block NFP (first Friday) as it's the most impactful
+        # Other news should be checked against an actual economic calendar API
         self.high_impact_news = {
-            'NFP': {'day': 4, 'time': 13, 'duration': 2},  # First Friday, 1:30 PM UTC
-            'FOMC': {'time': 18, 'duration': 3},  # 6 PM UTC
-            'CPI': {'time': 13, 'duration': 2},  # 1:30 PM UTC
-            'PPI': {'time': 13, 'duration': 1.5},  # 1:30 PM UTC
-            'GDP': {'time': 13, 'duration': 1},
-            'Interest_Rate': {'time': 12, 'duration': 2},
+            # Format: 'name': {'day_rule': 'first_friday' | 'mid_month' | 'specific', 'time': hour, 'duration': hours}
+            'NFP': {'day_rule': 'first_friday', 'time': 13, 'duration': 2},  # First Friday, 1:30 PM UTC
         }
+        
+        # FOMC dates are specific - would need external calendar
+        # For simplicity, only strictly enforcing NFP which is predictable
 
     # ============================================
     # 1. MULTI-TIMEFRAME CONFIRMATION
@@ -178,19 +182,20 @@ class AdvancedFilters:
         highs = [c['high'] for c in recent]
         lows = [c['low'] for c in recent]
         
-        # Check for higher highs/lows (bullish) or lower highs/lows (bearish)
-        if direction == 'long':
-            # Count higher highs and higher lows
-            hh_count = sum(1 for i in range(5, len(highs)) if highs[i] > max(highs[i-5:i]))
-            hl_count = sum(1 for i in range(5, len(lows)) if lows[i] > max(lows[i-5:i]))
-            score = (hh_count + hl_count) / 30  # Normalize to 0-1
-        else:  # short
-            # Count lower highs and lower lows
-            lh_count = sum(1 for i in range(5, len(highs)) if highs[i] < min(highs[i-5:i]))
-            ll_count = sum(1 for i in range(5, len(lows)) if lows[i] < min(lows[i-5:i]))
-            score = (lh_count + ll_count) / 30
+        def count_extremes(values, compare_higher=True):
+            """Count higher/lower extremes in sequence."""
+            comparator = max if compare_higher else min
+            return sum(
+                1 for i in range(5, len(values)) 
+                if (values[i] > comparator(values[i-5:i])) == compare_higher
+            )
         
-        return min(score, 1.0)
+        if direction == 'long':
+            extreme_count = count_extremes(highs, True) + count_extremes(lows, True)
+        else:
+            extreme_count = count_extremes(highs, False) + count_extremes(lows, False)
+        
+        return min(extreme_count / 30, 1.0)
 
     # ============================================
     # 2. PREVIOUS DAY HIGH/LOW
@@ -225,13 +230,26 @@ class AdvancedFilters:
                 date=datetime.combine(curr_date, datetime.min.time())
             )
 
-    def check_pdh_pdl_respect(self, candles: List[dict], direction: str) -> Tuple[bool, float]:
-        """
-        Check if price respects previous day high/low.
+    def _calculate_level_score(self, candles: List[dict], level: float, 
+                               price: float, is_bullish: bool) -> Tuple[bool, float]:
+        """Calculate respect score for a price level."""
+        recent = candles[-5:]
         
-        Returns:
-            (respected, distance_score)
-        """
+        if is_bullish:
+            touches = any(abs(c['low'] - level) / level < 0.001 for c in recent)
+            respected = price > level
+        else:
+            touches = any(abs(c['high'] - level) / level < 0.001 for c in recent)
+            respected = price < level
+        
+        if touches and respected:
+            return respected, 0.9
+        elif respected:
+            return respected, 0.7
+        return respected, 0.3
+
+    def check_pdh_pdl_respect(self, candles: List[dict], direction: str) -> Tuple[bool, float]:
+        """Check if price respects previous day high/low."""
         if not candles:
             return False, 0.0
         
@@ -241,98 +259,66 @@ class AdvancedFilters:
         if current_date not in self.previous_day_levels:
             self.update_daily_levels(candles)
             if current_date not in self.previous_day_levels:
-                return True, 0.5  # Neutral if no data
+                return True, 0.5
         
         levels = self.previous_day_levels[current_date]
         current_price = current['close']
         
-        # Check last 5 candles for level respect
-        recent = candles[-5:]
-        
         if direction == 'long':
-            # Should have bounced off PDL
-            touches_pdl = any(abs(c['low'] - levels.pdl) / levels.pdl < 0.001 for c in recent)
-            above_pdl = current_price > levels.pdl
-            
-            if touches_pdl and above_pdl:
-                distance_score = 0.9
-            elif above_pdl:
-                distance_score = 0.7
-            else:
-                distance_score = 0.3
-            
-            return above_pdl, distance_score
-        
-        else:  # short
-            # Should have rejected from PDH
-            touches_pdh = any(abs(c['high'] - levels.pdh) / levels.pdh < 0.001 for c in recent)
-            below_pdh = current_price < levels.pdh
-            
-            if touches_pdh and below_pdh:
-                distance_score = 0.9
-            elif below_pdh:
-                distance_score = 0.7
-            else:
-                distance_score = 0.3
-            
-            return below_pdh, distance_score
+            return self._calculate_level_score(candles, levels.pdl, current_price, True)
+        return self._calculate_level_score(candles, levels.pdh, current_price, False)
 
     # ============================================
     # 3. LIQUIDITY SWEEP DETECTION
     # ============================================
     
+    def _check_bullish_sweep(self, sweep: dict, reversal: dict, recent_low: float) -> Optional[LiquiditySweep]:
+        """Check for bullish liquidity sweep (swept low, reversed up)."""
+        swept_low = sweep['low'] < recent_low and sweep['close'] > recent_low
+        confirmed = reversal['close'] > sweep['close'] and reversal['close'] > reversal['open']
+        
+        if swept_low and confirmed:
+            strength = min((reversal['close'] - recent_low) / recent_low * 100, 1.0)
+            return LiquiditySweep(
+                timestamp=reversal['timestamp'],
+                sweep_type='low',
+                sweep_price=sweep['low'],
+                rejection_price=reversal['close'],
+                strength=strength
+            )
+        return None
+    
+    def _check_bearish_sweep(self, sweep: dict, reversal: dict, recent_high: float) -> Optional[LiquiditySweep]:
+        """Check for bearish liquidity sweep (swept high, reversed down)."""
+        swept_high = sweep['high'] > recent_high and sweep['close'] < recent_high
+        confirmed = reversal['close'] < sweep['close'] and reversal['close'] < reversal['open']
+        
+        if swept_high and confirmed:
+            strength = min((recent_high - reversal['close']) / recent_high * 100, 1.0)
+            return LiquiditySweep(
+                timestamp=reversal['timestamp'],
+                sweep_type='high',
+                sweep_price=sweep['high'],
+                rejection_price=reversal['close'],
+                strength=strength
+            )
+        return None
+
     def detect_liquidity_sweep(self, candles: List[dict]) -> Optional[LiquiditySweep]:
-        """
-        Detect liquidity sweep: false breakout followed by reversal.
-        """
+        """Detect liquidity sweep: false breakout followed by reversal."""
         if len(candles) < 15:
             return None
         
         recent = candles[-15:]
-        lookback = recent[-10:-2]  # Candles before last 2
-        last_two = recent[-2:]
+        lookback = recent[-10:-2]
+        sweep_candle, reversal_candle = recent[-2], recent[-1]
         
-        # Find recent high/low
         recent_high = max(c['high'] for c in lookback)
         recent_low = min(c['low'] for c in lookback)
         
-        # Check for sweep of high (bearish sweep)
-        sweep_candle = last_two[0]
-        reversal_candle = last_two[1]
-        
-        # Bullish liquidity sweep (swept low, then reversed up)
-        if (sweep_candle['low'] < recent_low and  # Swept below low
-            sweep_candle['close'] > recent_low and  # But closed above
-            reversal_candle['close'] > sweep_candle['close'] and  # Confirmed reversal
-            reversal_candle['close'] > reversal_candle['open']):  # Bullish close
-            
-            strength = (reversal_candle['close'] - recent_low) / recent_low * 100
-            
-            return LiquiditySweep(
-                timestamp=reversal_candle['timestamp'],
-                sweep_type='low',
-                sweep_price=sweep_candle['low'],
-                rejection_price=reversal_candle['close'],
-                strength=min(strength, 1.0)
-            )
-        
-        # Bearish liquidity sweep (swept high, then reversed down)
-        if (sweep_candle['high'] > recent_high and  # Swept above high
-            sweep_candle['close'] < recent_high and  # But closed below
-            reversal_candle['close'] < sweep_candle['close'] and  # Confirmed reversal
-            reversal_candle['close'] < reversal_candle['open']):  # Bearish close
-            
-            strength = (recent_high - reversal_candle['close']) / recent_high * 100
-            
-            return LiquiditySweep(
-                timestamp=reversal_candle['timestamp'],
-                sweep_type='high',
-                sweep_price=sweep_candle['high'],
-                rejection_price=reversal_candle['close'],
-                strength=min(strength, 1.0)
-            )
-        
-        return None
+        # Check bullish sweep first, then bearish
+        return (self._check_bullish_sweep(sweep_candle, reversal_candle, recent_low) or
+                self._check_bearish_sweep(sweep_candle, reversal_candle, recent_high))
 
     # ============================================
     # 4. CANDLE PATTERN CONFLUENCE
@@ -461,17 +447,28 @@ class AdvancedFilters:
                 return False, ''
         
         asian_range = self.asian_ranges[current_date]
-        recent = candles[-5:]
+        recent = candles[-10:]  # Look at more candles for sweep confirmation
+        current_price = current['close']
+        
+        # Calculate buffer (10 pips) for clean sweep confirmation
+        pip_value = 0.0001
+        buffer = 10 * pip_value  # 10 pips buffer
         
         # Check if swept high (bearish signal)
-        swept_high = any(c['high'] > asian_range.high for c in recent)
-        if swept_high and current['close'] < asian_range.high:
-            return True, 'high'
+        # MUST have price trade ABOVE asian high, then close BACK BELOW
+        swept_high = any(c['high'] > asian_range.high + buffer for c in recent)
+        if swept_high:
+            # Ensure price has come back inside - this is the actual sweep
+            if current_price < asian_range.high:
+                return True, 'high'
         
         # Check if swept low (bullish signal)
-        swept_low = any(c['low'] < asian_range.low for c in recent)
-        if swept_low and current['close'] > asian_range.low:
-            return True, 'low'
+        # MUST have price trade BELOW asian low, then close BACK ABOVE
+        swept_low = any(c['low'] < asian_range.low - buffer for c in recent)
+        if swept_low:
+            # Ensure price has come back inside - this is the actual sweep
+            if current_price > asian_range.low:
+                return True, 'low'
         
         return False, ''
 
@@ -482,6 +479,7 @@ class AdvancedFilters:
     def is_news_time(self, timestamp: int) -> Tuple[bool, str]:
         """
         Check if current time is within 30 min before/after high-impact news.
+        Only blocks on ACTUAL news days, not every day.
         
         Returns:
             (is_news_time, reason)
@@ -491,23 +489,34 @@ class AdvancedFilters:
         current_minute = dt.minute
         current_time = current_hour + current_minute / 60.0
         
-        # Check each news event
+        # Check each news event with proper day validation
         for news_name, details in self.high_impact_news.items():
+            day_rule = details.get('day_rule', 'none')
             news_hour = details['time']
             news_duration = details['duration']
             
+            # Check if this news event happens TODAY
+            is_news_day = False
+            
+            if day_rule == 'first_friday':
+                # First Friday of month: weekday=4 (Friday) and day 1-7
+                is_news_day = dt.weekday() == 4 and 1 <= dt.day <= 7
+            elif day_rule == 'mid_month':
+                # Mid-month news (CPI/PPI): typically 10th-15th
+                is_news_day = 10 <= dt.day <= 15
+            elif day_rule == 'specific':
+                # Would check against calendar - skip for now
+                is_news_day = False
+            
+            if not is_news_day:
+                continue
+                
             # Create avoidance window: 30 min before to 30 min after
             avoid_start = news_hour - 0.5
             avoid_end = news_hour + news_duration + 0.5
             
             if avoid_start <= current_time <= avoid_end:
                 return True, f"{news_name} at {news_hour}:00 UTC"
-        
-        # Additional check for first Friday (NFP)
-        if dt.weekday() == 4 and 7 <= dt.day <= 14:  # First Friday of month
-            nfp_time = 13.5  # 1:30 PM UTC
-            if abs(current_time - nfp_time) < 1.0:
-                return True, "NFP (Non-Farm Payrolls)"
         
         return False, ''
 
@@ -516,6 +525,15 @@ class AdvancedFilters:
         Comprehensive check: Can we trade now?
         - Not during news
         - Not during low-liquidity periods
+        - Only during OPTIMAL trading sessions (London, Overlap, Early NY)
+        - Avoid early London (false breakouts) and Fridays
+        
+        Trading Sessions (UTC):
+        - Late London: 10:00 - 12:00 (avoid early London fakeouts)
+        - London/NY Overlap: 12:00 - 16:00 (best volatility - ICT sweet spot)
+        - NY AM: 16:00 - 17:00 (ICT NY killzone - shortened)
+        
+        For higher win rate, we focus on these high-probability windows.
         
         Returns:
             (can_trade, reason_if_not)
@@ -527,19 +545,42 @@ class AdvancedFilters:
         if is_news:
             return False, f"News event: {news_reason}"
         
+        # Avoid Friday completely - end of week choppiness
+        if dt.weekday() == 4:
+            return False, "Friday - avoid end of week"
+        
         # Check day of week
         if dt.weekday() == 6:  # Sunday
             return False, "Sunday - market opening"
         
-        if dt.weekday() == 4 and dt.hour >= 20:  # Friday evening
-            return False, "Friday evening - low liquidity"
-        
-        # Check session (only London/NY)
+        # ICT KILLZONES ONLY - avoid early London (8-10) which has more fakeouts
+        # Best hours: 10:00-17:00 UTC (late London + Overlap + early NY)
         hour = dt.hour
-        if not (8 <= hour < 22):  # Outside 8 AM - 10 PM UTC
-            return False, "Outside London/NY sessions"
+        if not (10 <= hour < 17):
+            return False, "Outside optimal ICT hours"
         
         return True, ''
+    
+    def get_current_session(self, timestamp: int) -> str:
+        """
+        Get the current trading session name.
+        
+        Returns:
+            Session name: 'PRE_LONDON', 'LONDON', 'OVERLAP', 'NY', or 'CLOSED'
+        """
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        hour = dt.hour
+        
+        if 7 <= hour < 8:
+            return 'PRE_LONDON'  # Asian sweep detection time
+        elif 8 <= hour < 13:
+            return 'LONDON'
+        elif 13 <= hour < 16:
+            return 'OVERLAP'  # London/NY overlap - best volatility
+        elif 16 <= hour < 21:
+            return 'NY'
+        else:
+            return 'CLOSED'
 
     # ============================================
     # 7. ORDER BLOCKS (5M & 15M)

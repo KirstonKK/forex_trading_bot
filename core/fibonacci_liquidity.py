@@ -88,57 +88,44 @@ class LiquidityAnalyzer:
     """Analyze liquidity pools (equal highs/equal lows)."""
     
     @staticmethod
-    def detect_equal_highs_lows(candles: List[dict], tolerance: float = 0.0005) -> Dict[str, List[float]]:
-        """
-        Detect equal highs and equal lows (liquidity pools).
+    def _find_swing_points(candles: List[dict], point_type: str) -> List[float]:
+        """Find swing highs or lows (local extrema)."""
+        points = []
+        key = 'high' if point_type == 'high' else 'low'
+        compare = (lambda a, b: a > b) if point_type == 'high' else (lambda a, b: a < b)
         
-        Args:
-            candles: Price candles
-            tolerance: Price similarity tolerance (0.05% default)
-            
-        Returns:
-            Dictionary with 'equal_highs' and 'equal_lows' lists
-        """
+        for i in range(2, len(candles) - 2):
+            val = candles[i][key]
+            if (compare(val, candles[i-1][key]) and 
+                compare(val, candles[i-2][key]) and
+                compare(val, candles[i+1][key])):
+                points.append(val)
+        return points
+    
+    @staticmethod
+    def _group_equal_points(points: List[float], tolerance: float) -> List[float]:
+        """Group similar price points within tolerance."""
+        equal_points = []
+        for i, p1 in enumerate(points):
+            for p2 in points[i + 1:]:
+                if abs(p1 - p2) / p1 <= tolerance:
+                    equal_points.append(p1)
+                    break
+        return equal_points
+    
+    @staticmethod
+    def detect_equal_highs_lows(candles: List[dict], tolerance: float = 0.0005) -> Dict[str, List[float]]:
+        """Detect equal highs and equal lows (liquidity pools)."""
         if len(candles) < 10:
             return {'equal_highs': [], 'equal_lows': []}
         
         recent = candles[-20:]
-        
-        # Find swing highs (local maxima)
-        swing_highs = []
-        for i in range(2, len(recent) - 2):
-            if (recent[i]['high'] > recent[i-1]['high'] and 
-                recent[i]['high'] > recent[i-2]['high'] and
-                recent[i]['high'] > recent[i+1]['high']):
-                swing_highs.append(recent[i]['high'])
-        
-        # Find swing lows (local minima)
-        swing_lows = []
-        for i in range(2, len(recent) - 2):
-            if (recent[i]['low'] < recent[i-1]['low'] and 
-                recent[i]['low'] < recent[i-2]['low'] and
-                recent[i]['low'] < recent[i+1]['low']):
-                swing_lows.append(recent[i]['low'])
-        
-        # Group equal highs
-        equal_highs = []
-        for i in range(len(swing_highs)):
-            for j in range(i + 1, len(swing_highs)):
-                if abs(swing_highs[i] - swing_highs[j]) / swing_highs[i] <= tolerance:
-                    equal_highs.append(swing_highs[i])
-                    break
-        
-        # Group equal lows
-        equal_lows = []
-        for i in range(len(swing_lows)):
-            for j in range(i + 1, len(swing_lows)):
-                if abs(swing_lows[i] - swing_lows[j]) / swing_lows[i] <= tolerance:
-                    equal_lows.append(swing_lows[i])
-                    break
+        swing_highs = LiquidityAnalyzer._find_swing_points(recent, 'high')
+        swing_lows = LiquidityAnalyzer._find_swing_points(recent, 'low')
         
         return {
-            'equal_highs': equal_highs,
-            'equal_lows': equal_lows
+            'equal_highs': LiquidityAnalyzer._group_equal_points(swing_highs, tolerance),
+            'equal_lows': LiquidityAnalyzer._group_equal_points(swing_lows, tolerance)
         }
     
     @staticmethod

@@ -5,6 +5,7 @@ Implements 1% risk rule and position sizing.
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Tuple
 
 
 class PositionType(Enum):
@@ -40,6 +41,19 @@ class RiskManager:
         self.account_balance = account_balance
         self.risk_percent = risk_percent
         self.risk_per_trade = (account_balance * risk_percent) / 100
+    
+    def _calculate_pips(self, position_type: PositionType, entry: float, 
+                        stop_loss: float, target: float) -> Tuple[float, float]:
+        """Calculate risk and reward in pips."""
+        if position_type == PositionType.LONG:
+            return abs(entry - stop_loss), abs(target - entry)
+        return abs(stop_loss - entry), abs(entry - target)
+    
+    def _calculate_size_from_risk(self, risk_pips: float, pip_value: int = 10) -> int:
+        """Calculate position size based on risk."""
+        pip_cost = risk_pips * pip_value
+        size = int(self.risk_per_trade / pip_cost) if pip_cost > 0 else 0
+        return max(size, 1000)  # Minimum 0.01 lots
 
     def calculate_position_size(
         self,
@@ -49,44 +63,16 @@ class RiskManager:
         stop_loss: float,
         target_price: float
     ) -> Position:
-        """
-        Calculate position size based on 1% risk rule.
+        """Calculate position size based on 1% risk rule."""
+        risk_pips, reward_pips = self._calculate_pips(
+            position_type, entry_price, stop_loss, target_price
+        )
         
-        Args:
-            symbol: Trading pair (e.g., "EURUSD")
-            position_type: LONG or SHORT
-            entry_price: Entry price level
-            stop_loss: Stop loss price
-            target_price: Target price
-            
-        Returns:
-            Position object with calculated size
-        """
-        # Calculate risk and reward amounts
-        if position_type == PositionType.LONG:
-            risk_pips = abs(entry_price - stop_loss)
-            reward_pips = abs(target_price - entry_price)
-        else:  # SHORT
-            risk_pips = abs(stop_loss - entry_price)
-            reward_pips = abs(entry_price - target_price)
-        
-        # Validate risk:reward ratio
         if risk_pips == 0:
             raise ValueError("Stop loss equals entry price")
         
-        risk_reward_ratio = reward_pips / risk_pips
-        
-        # Calculate position size (assuming 1 pip = 10 units for standard pairs)
-        pip_value = 10  # Standard for most forex pairs
-        pip_cost = risk_pips * pip_value
-        
-        if pip_cost > 0:
-            position_size = int(self.risk_per_trade / pip_cost)
-        else:
-            position_size = 0
-        
-        # Ensure minimum position size
-        position_size = max(position_size, 1000)  # At least 0.01 lots
+        position_size = self._calculate_size_from_risk(risk_pips)
+        pip_value = 10
         
         risk_amount = position_size * risk_pips * pip_value / 100000
         reward_amount = position_size * reward_pips * pip_value / 100000
@@ -100,7 +86,7 @@ class RiskManager:
             position_size=position_size,
             risk_amount=risk_amount,
             reward_amount=reward_amount,
-            risk_reward_ratio=risk_reward_ratio
+            risk_reward_ratio=reward_pips / risk_pips
         )
 
     def validate_position(self, position: Position) -> bool:

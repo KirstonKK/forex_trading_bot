@@ -74,128 +74,92 @@ class SMCAnalyzer:
     def __init__(self):
         self.last_structure = None
 
+    def _create_bos(self, timestamp: int, price: float, structure_type: StructureType,
+                    strength: float, reference_level: float) -> BreakOfStructure:
+        """Create a BreakOfStructure object."""
+        bos = BreakOfStructure(
+            timestamp=timestamp,
+            price=price,
+            structure_type=structure_type,
+            strength=min(strength, 1.0)
+        )
+        if structure_type == StructureType.HIGHER_HIGH:
+            bos.higher_low = reference_level
+        else:
+            bos.lower_high = reference_level
+        return bos
+
     def detect_break_of_structure(self, candles: List[dict]) -> Optional[BreakOfStructure]:
-        """
-        Detect break of structure (BOS).
-        
-        Uptrend BOS: Price breaks above previous higher high
-        Downtrend BOS: Price breaks below previous lower low
-        """
+        """Detect break of structure (BOS)."""
         if len(candles) < 10:
             return None
         
-        # Get recent 20 candles for structure analysis
         recent = candles[-20:]
         current_price = candles[-1]['close']
-        
-        # Identify structure in last 15 candles
         structure_candles = recent[-15:]
-        s_highs = [c['high'] for c in structure_candles]
-        s_lows = [c['low'] for c in structure_candles]
         
-        max_high = max(s_highs[:-2])  # Exclude last 2
-        min_low = min(s_lows[:-2])
+        max_high = max(c['high'] for c in structure_candles[:-2])
+        min_low = min(c['low'] for c in structure_candles[:-2])
         
-        # Check for BOS above (relaxed to 0.07% from 0.1%)
+        # BOS above (bullish)
         if current_price > max_high * 1.0007:
-            # Recent higher lows
-            recent_low = min([c['low'] for c in recent[-5:]])
+            recent_low = min(c['low'] for c in recent[-5:])
             strength = min((current_price - max_high) / (max_high * 0.007), 1.0)
-            
-            return BreakOfStructure(
-                timestamp=candles[-1]['timestamp'],
-                price=current_price,
-                structure_type=StructureType.HIGHER_HIGH,
-                strength=min(strength, 1.0),
-                higher_low=recent_low
-            )
+            return self._create_bos(candles[-1]['timestamp'], current_price,
+                                    StructureType.HIGHER_HIGH, strength, recent_low)
         
-        # Check for BOS below
+        # BOS below (bearish)
         if current_price < min_low * 0.9993:
-            # Recent lower highs
-            recent_high = max([c['high'] for c in recent[-5:]])
+            recent_high = max(c['high'] for c in recent[-5:])
             strength = min((min_low - current_price) / (min_low * 0.007), 1.0)
-            
-            return BreakOfStructure(
-                timestamp=candles[-1]['timestamp'],
-                price=current_price,
-                structure_type=StructureType.LOWER_LOW,
-                strength=min(strength, 1.0),
-                lower_high=recent_high
-            )
+            return self._create_bos(candles[-1]['timestamp'], current_price,
+                                    StructureType.LOWER_LOW, strength, recent_high)
         
         return None
 
+    def _calculate_pullback_confidence(self, distance: float, pullback_range: float) -> Optional[float]:
+        """Calculate pullback zone confidence based on distance ratio."""
+        ratio = distance / pullback_range
+        if 0.2 <= ratio <= 0.6:
+            return 0.85
+        if 0.1 <= ratio <= 0.7:
+            return 0.7
+        return None
+
     def detect_pullback(self, candles: List[dict], bos: BreakOfStructure) -> Optional[PullbackZone]:
-        """
-        Detect pullback zone after BOS.
-        Pullback should show actual retracement, not just random movement.
-        Look for pullback that retraces 25-50% of recent move.
-        """
+        """Detect pullback zone after BOS."""
         if len(candles) < 10:
             return None
         
-        recent = candles[-8:]  # Last 8 candles
+        recent = candles[-8:]
         current_price = candles[-1]['close']
+        high = max(c['high'] for c in recent)
+        low = min(c['low'] for c in recent)
+        pullback_range = high - low
         
+        # Require meaningful pullback (at least 0.15% of price)
+        if pullback_range < current_price * 0.0015:
+            return None
+        
+        # Calculate distance based on structure type
         if bos.structure_type == StructureType.HIGHER_HIGH:
-            # Uptrend - pullback goes down, then consolidates
-            high = max(c['high'] for c in recent)
-            low = min(c['low'] for c in recent)
-            pullback_range = high - low
-            
-            # Require meaningful pullback (at least 0.15% of price)
-            min_pullback = current_price * 0.0015
-            if pullback_range < min_pullback:
-                return None
-            
-            # Check if we're near the bottom of pullback (good entry)
-            # Current price should be within 20-50% of the pullback range from bottom
-            distance_from_low = current_price - low
-            if 0.2 * pullback_range <= distance_from_low <= 0.6 * pullback_range:
-                confidence = 0.85
-            elif 0.1 * pullback_range <= distance_from_low <= 0.7 * pullback_range:
-                confidence = 0.7
-            else:
-                return None  # Not in good pullback zone
-            
-            return PullbackZone(
-                timestamp=candles[-1]['timestamp'],
-                entry_price=current_price,
-                zone_high=high,
-                zone_low=low,
-                confidence=confidence
-            )
-        
+            distance = current_price - low
         elif bos.structure_type == StructureType.LOWER_LOW:
-            # Downtrend - pullback goes up, then consolidates
-            high = max(c['high'] for c in recent)
-            low = min(c['low'] for c in recent)
-            pullback_range = high - low
-            
-            # Require meaningful pullback
-            min_pullback = current_price * 0.0015
-            if pullback_range < min_pullback:
-                return None
-            
-            # Check if we're near the top of pullback (good entry for short)
-            distance_from_high = high - current_price
-            if 0.2 * pullback_range <= distance_from_high <= 0.6 * pullback_range:
-                confidence = 0.85
-            elif 0.1 * pullback_range <= distance_from_high <= 0.7 * pullback_range:
-                confidence = 0.7
-            else:
-                return None  # Not in good pullback zone
-            
-            return PullbackZone(
-                timestamp=candles[-1]['timestamp'],
-                entry_price=current_price,
-                zone_high=high,
-                zone_low=low,
-                confidence=confidence
-            )
+            distance = high - current_price
+        else:
+            return None
         
-        return None
+        confidence = self._calculate_pullback_confidence(distance, pullback_range)
+        if not confidence:
+            return None
+        
+        return PullbackZone(
+            timestamp=candles[-1]['timestamp'],
+            entry_price=current_price,
+            zone_high=high,
+            zone_low=low,
+            confidence=confidence
+        )
 
     def identify_fair_value_gap(self, candles: List[dict]) -> Optional[Tuple[float, float, EntryZoneType]]:
         """
@@ -310,12 +274,45 @@ class SMCAnalyzer:
         
         return None
 
-    def generate_entry_signal(self, candles: List[dict]) -> Optional[SMCEntrySignal]:
-        """
-        Generate complete entry signal based on SMC strategy.
+    def _find_entry_zone(self, candles: List[dict]) -> Optional[Tuple[float, float, EntryZoneType]]:
+        """Find the best entry zone from FVG, order block, or discount zone."""
+        # Check FVG first (highest priority)
+        fvg = self.identify_fair_value_gap(candles)
+        if fvg:
+            return fvg
         
-        Pattern: BOS → Pullback → Entry at FVG/Discount Zone/Order Block
-        """
+        # Check order block
+        ob = self.identify_order_block(candles)
+        if ob:
+            return (ob[0], ob[1], EntryZoneType.ORDER_BLOCK)
+        
+        # Check discount zone
+        discount = self.identify_discount_zone(candles)
+        if discount:
+            return (discount[0], discount[1], EntryZoneType.DISCOUNT_ZONE)
+        
+        return None
+    
+    def _calculate_sl_tp(self, current_price: float, entry_low: float, entry_high: float,
+                         is_long: bool, rr_multiplier: float = 2.0) -> Tuple[float, float, float]:
+        """Calculate stop loss, take profit, and RR ratio."""
+        if is_long:
+            stop_loss = entry_low * 0.998
+            risk = current_price - stop_loss
+            target_price = current_price + risk * rr_multiplier
+        else:
+            stop_loss = entry_high * 1.002
+            risk = stop_loss - current_price
+            target_price = current_price - risk * rr_multiplier
+        
+        risk = abs(current_price - stop_loss)
+        reward = abs(target_price - current_price)
+        rr_ratio = reward / risk if risk > 0 else 0
+        
+        return stop_loss, target_price, rr_ratio
+
+    def generate_entry_signal(self, candles: List[dict]) -> Optional[SMCEntrySignal]:
+        """Generate complete entry signal based on SMC strategy."""
         if len(candles) < 20:
             return None
         
@@ -324,76 +321,36 @@ class SMCAnalyzer:
         if not bos:
             return None
         
-        # Step 2: Detect pullback with proper retracement
+        # Step 2: Validate pullback
         recent = candles[-5:]
-        high = max(c['high'] for c in recent)
-        low = min(c['low'] for c in recent)
-        pullback_size = high - low
-        
-        # Pullback exists if there's volatility
-        if pullback_size < candles[-1]['close'] * 0.0002:
+        high, low = max(c['high'] for c in recent), min(c['low'] for c in recent)
+        if (high - low) < candles[-1]['close'] * 0.0002:
             return None
         
         pullback = PullbackZone(
             timestamp=candles[-1]['timestamp'],
             entry_price=candles[-1]['close'],
-            zone_high=high,
-            zone_low=low,
-            confidence=0.75
+            zone_high=high, zone_low=low, confidence=0.75
         )
         
-        # Step 3: Identify entry zone
-        current_price = candles[-1]['close']
-        entry_zone_type = None
-        entry_low = None
-        entry_high = None
-        
-        # Check FVG first
-        fvg = self.identify_fair_value_gap(candles)
-        if fvg:
-            entry_low, entry_high, entry_zone_type = fvg
-        
-        # Check order block
-        if entry_zone_type is None:
-            ob = self.identify_order_block(candles)
-            if ob:
-                entry_low, entry_high = ob
-                entry_zone_type = EntryZoneType.ORDER_BLOCK
-        
-        # Check discount zone
-        if entry_zone_type is None:
-            discount = self.identify_discount_zone(candles)
-            if discount:
-                entry_low, entry_high = discount
-                entry_zone_type = EntryZoneType.DISCOUNT_ZONE
-        
-        if entry_zone_type is None:
+        # Step 3: Find entry zone
+        entry_zone = self._find_entry_zone(candles)
+        if not entry_zone:
             return None
+        entry_low, entry_high, entry_zone_type = entry_zone
         
-        # Step 4: Calculate SL and TP
-        if bos.structure_type == StructureType.HIGHER_HIGH:
-            # Long entry
-            stop_loss = entry_low * 0.998
-            # Use 2.0x RR ratio (more achievable than 2.5x, better than 1.8x)
-            target_price = current_price + (current_price - stop_loss) * 2.0
-        else:
-            # Short entry
-            stop_loss = entry_high * 1.002
-            target_price = current_price - (stop_loss - current_price) * 2.0
+        # Step 4: Calculate SL/TP
+        is_long = bos.structure_type == StructureType.HIGHER_HIGH
+        current_price = candles[-1]['close']
+        stop_loss, target_price, rr_ratio = self._calculate_sl_tp(
+            current_price, entry_low, entry_high, is_long
+        )
         
-        # Calculate RR ratio
-        risk = abs(current_price - stop_loss)
-        reward = abs(target_price - current_price)
-        rr_ratio = reward / risk if risk > 0 else 0
-        
-        # Require minimum RR ratio of 1.5:1
+        # Validate minimum RR and signal strength
         if rr_ratio < 1.5:
             return None
         
-        # Overall signal strength - require stronger signals
         strength = min(bos.strength * 0.6 + pullback.confidence * 0.4, 1.0)
-        
-        # Filter: require signal strength of 0.65+ (high confidence)
         if strength < 0.65:
             return None
         
