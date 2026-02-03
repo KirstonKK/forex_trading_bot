@@ -218,8 +218,20 @@ class DailyReportTracker:
         return False
     
     def mark_report_sent(self):
-        """Mark that we've sent today's report."""
+        """Mark that we've sent today's report and save a copy."""
         self.data['last_report_sent'] = date.today().isoformat()
+        
+        # Save a copy of the report for historical reference
+        try:
+            report_archive_file = DATA_DIR / f'report_{date.today().isoformat()}.json'
+            save_data = self.data.copy()
+            save_data['rejections'] = dict(save_data.get('rejections', {}))
+            save_data['hourly_activity'] = dict(save_data.get('hourly_activity', {}))
+            with open(report_archive_file, 'w') as f:
+                json.dump(save_data, f, indent=2, default=str)
+        except Exception as e:
+            logger.error(f"Failed to archive report: {e}")
+        
         self._save_data()
 
 
