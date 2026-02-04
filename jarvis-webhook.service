@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Forex Trading Bot - Webhook Server
+After=network.target
+
+[Service]
+Type=simple
+User=juujuaddy
+WorkingDirectory=/home/juujuaddy/forex_trading_bot
+Environment="PATH=/home/juujuaddy/forex_trading_bot/venv/bin:/usr/bin"
+ExecStart=/home/juujuaddy/forex_trading_bot/venv/bin/python /home/juujuaddy/forex_trading_bot/scripts/tradingview_webhook_server.py
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/juujuaddy/forex_trading_bot/logs/webhook.log
+StandardError=append:/home/juujuaddy/forex_trading_bot/logs/webhook_error.log
+
+[Install]
+WantedBy=multi-user.target

@@ -939,7 +939,7 @@ class FlexibleICTStrategy:
             'has_fib_confluence': True
         }
     
-    def find_sweep_level(self, candles: List[dict], direction: str) -> float:
+    def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
         """
         Find the liquidity sweep level (swing high/low that was swept).
         This is where we place SL - beyond the swept level.
@@ -947,13 +947,21 @@ class FlexibleICTStrategy:
         For SHORT: Find the recent swing high that was swept
         For LONG: Find the recent swing low that was swept
         
-        Use TIGHTER structure (last 20 candles = ~100 min) for better SL placement.
+        For HTF_LIQUIDITY_BOS setups: Use TIGHTER structure (last 10 candles) for 5-7 pip SL
+        For other setups: Use standard structure (last 20 candles)
         """
-        if len(candles) < 20:
+        if len(candles) < 10:
             return None
         
-        # Use tighter recent range for better SL (20 candles = ~1.5 hours)
-        recent = candles[-20:] if len(candles) >= 20 else candles
+        # HTF_LIQUIDITY_BOS gets tighter SL (10 candles = ~50 min for 5M)
+        # This gives 5-7 pip SL for high-confidence setups
+        if setup_type == 'HTF_LIQUIDITY_BOS':
+            lookback = min(10, len(candles))
+        else:
+            # Standard setups use wider structure (20 candles = ~100 min)
+            lookback = min(20, len(candles))
+        
+        recent = candles[-lookback:]
         
         if direction == 'short':
             # Find the highest swing high in recent candles (exclude last 3)
@@ -970,14 +978,18 @@ class FlexibleICTStrategy:
         Calculate SL/TP based on ICT principles:
         - SL: Beyond the liquidity sweep level (swing high/low that was swept)
         - TP: 3x the risk (1:3 RR)
+        
+        HTF_LIQUIDITY_BOS gets tighter SL (5-7 pips) due to high confidence (95%)
         """
         direction = setup_data['direction']
         pip_value = 0.10 if symbol == 'XAUUSD' else 0.0001
         is_long = direction == 'long'
+        setup_type = setup_data['setup_type'].value if hasattr(setup_data['setup_type'], 'value') else str(setup_data['setup_type'])
         
         # ICT SL Placement: Beyond the liquidity sweep level
         # This is the swing high/low that was swept before entry
-        sweep_level = self.find_sweep_level(candles, direction)
+        # Pass setup_type to use tighter structure for HTF_LIQUIDITY_BOS
+        sweep_level = self.find_sweep_level(candles, direction, setup_type)
         
         if sweep_level is None:
             # Fallback to OB/zone based SL
@@ -991,8 +1003,14 @@ class FlexibleICTStrategy:
                 recent = candles[-20:]
                 sweep_level = min(c['low'] for c in recent) if is_long else max(c['high'] for c in recent)
         
-        # Apply buffer beyond the sweep level (5 pips = 50 points)
-        buffer = 0.0005  # 5 pips buffer beyond sweep level
+        # Apply buffer beyond the sweep level
+        # HTF_LIQUIDITY_BOS: 3 pip buffer (tighter for high confidence)
+        # Other setups: 5 pip buffer (standard)
+        if setup_type == 'HTF_LIQUIDITY_BOS':
+            buffer = 0.0003  # 3 pips buffer for high-confidence setups
+        else:
+            buffer = 0.0005  # 5 pips buffer for standard setups
+        
         if is_long:
             stop_loss = sweep_level - buffer  # SL below the swept low
         else:
@@ -1006,8 +1024,13 @@ class FlexibleICTStrategy:
         # Max SL limits by pair (in points, 10 points = 1 pip)
         # EUR/USD, GBP/USD: 25 pips max = 250 points
         # XAUUSD uses different calculation
-        max_sl_points = 250  # 25 pips max for forex
-        min_sl_points = 80   # 8 pips min (too tight = noise)
+        # HTF_LIQUIDITY_BOS: Tighter limits (5-7 pips) for precision
+        if setup_type == 'HTF_LIQUIDITY_BOS':
+            max_sl_points = 70   # 7 pips max for HTF_LIQUIDITY_BOS
+            min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+        else:
+            max_sl_points = 250  # 25 pips max for other setups
+            min_sl_points = 80   # 8 pips min (too tight = noise)
         
         # Validate SL range
         if sl_points < min_sl_points:

@@ -1284,12 +1284,20 @@ if __name__ == '__main__':
                             top_rejections = sorted(rejections.items(), key=lambda x: x[1], reverse=True)[:3]
                             rej_text = "\n".join([f"  • {r[0]}: {r[1]}" for r in top_rejections]) or "  None"
                             
+                            # Format active time
+                            hours = stats.get('hours_active', 0)
+                            mins = stats.get('minutes_active', 0)
+                            if hours > 0:
+                                time_active = f"{hours}h {mins}m"
+                            else:
+                                time_active = f"{mins}m"
+                            
                             response_text = (
                                 f"📊 <b>Today's Statistics</b>\n\n"
                                 f"<b>Signals:</b> {len(signals)}\n"
                                 f"<b>Candles Analyzed:</b> {stats.get('candles_analyzed', 0)}\n"
                                 f"<b>Setups Checked:</b> {stats.get('setups_checked', 0)}\n"
-                                f"<b>Hours Active:</b> {stats.get('hours_active', 0)}h\n\n"
+                                f"<b>Active Time:</b> {time_active}\n\n"
                                 f"<b>Top Rejections:</b>\n{rej_text}"
                             )
                         else:

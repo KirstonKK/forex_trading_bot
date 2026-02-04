@@ -78,6 +78,26 @@ class TradesDatabase:
             )
         """)
         
+        # Signals table - track all generated signals
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                setup_type TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                stop_loss REAL NOT NULL,
+                take_profit REAL NOT NULL,
+                risk_reward REAL,
+                confidence REAL,
+                confirmations TEXT,
+                timestamp TIMESTAMP NOT NULL,
+                executed BOOLEAN DEFAULT 0,
+                trade_id TEXT,
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+        
         conn.commit()
         conn.close()
 
@@ -222,3 +242,106 @@ class TradesDatabase:
         except Exception as e:
             print(f"Error getting performance: {e}")
             return []
+    
+    def save_signal(self, signal_dict: Dict) -> bool:
+        """Save a trading signal to database."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Convert confirmations list to JSON string
+            import json
+            confirmations_str = json.dumps(signal_dict.get('confirmations', []))
+            
+            cursor.execute("""
+                INSERT INTO signals (
+                    symbol, direction, setup_type, entry_price,
+                    stop_loss, take_profit, risk_reward, confidence,
+                    confirmations, timestamp, executed, trade_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                signal_dict.get('symbol'),
+                signal_dict.get('direction'),
+                signal_dict.get('setup_type'),
+                signal_dict.get('entry_price'),
+                signal_dict.get('stop_loss'),
+                signal_dict.get('take_profit'),
+                signal_dict.get('risk_reward'),
+                signal_dict.get('confidence'),
+                confirmations_str,
+                signal_dict.get('timestamp', datetime.now()),
+                signal_dict.get('executed', False),
+                signal_dict.get('trade_id')
+            ))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error saving signal: {e}")
+            return False
+    
+    def get_signals(self, symbol: str = None, date: str = None) -> List[Dict]:
+        """Get signals from database."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            query = "SELECT * FROM signals WHERE 1=1"
+            params = []
+            
+            if symbol:
+                query += " AND symbol = ?"
+                params.append(symbol)
+            
+            if date:
+                query += " AND DATE(timestamp) = ?"
+                params.append(date)
+            
+            query += " ORDER BY timestamp DESC"
+            
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            import json
+            signals = []
+            for row in rows:
+                signals.append({
+                    'id': row[0],
+                    'symbol': row[1],
+                    'direction': row[2],
+                    'setup_type': row[3],
+                    'entry_price': row[4],
+                    'stop_loss': row[5],
+                    'take_profit': row[6],
+                    'risk_reward': row[7],
+                    'confidence': row[8],
+                    'confirmations': json.loads(row[9]) if row[9] else [],
+                    'timestamp': row[10],
+                    'executed': bool(row[11]),
+                    'trade_id': row[12]
+                })
+            
+            conn.close()
+            return signals
+        except Exception as e:
+            print(f"Error getting signals: {e}")
+            return []
+    
+    def get_today_signals_count(self) -> int:
+        """Get count of signals generated today."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT COUNT(*) FROM signals 
+                WHERE DATE(timestamp) = DATE('now')
+            """)
+            count = cursor.fetchone()[0]
+            
+            conn.close()
+            return count
+        except Exception as e:
+            print(f"Error getting today's signals count: {e}")
+            return 0

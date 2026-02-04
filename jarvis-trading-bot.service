@@ -1,0 +1,20 @@
+[Unit]
+Description=Jarvis Forex Trading Bot - Complete System
+After=network.target
+
+[Service]
+Type=simple
+User=juujuaddy
+WorkingDirectory=/home/juujuaddy/forex_trading_bot
+ExecStart=/home/juujuaddy/forex_trading_bot/scripts/start_bot_simple.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/home/juujuaddy/forex_trading_bot/logs/service.log
+StandardError=append:/home/juujuaddy/forex_trading_bot/logs/service_error.log
+
+# Keep it running
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

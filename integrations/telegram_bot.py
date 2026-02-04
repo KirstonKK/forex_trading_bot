@@ -304,7 +304,12 @@ class TelegramNotifier:
             message += f"   Setups Checked: {stats.get('setups_checked', 0)}\n"
             message += f"   Valid Sweeps: {stats.get('valid_sweeps', 0)}\n"
             message += f"   Valid BoS: {stats.get('valid_bos', 0)}\n"
-            message += f"   Session Hours Active: {stats.get('hours_active', 0)}h\n"
+            
+            # Format active time
+            hours = stats.get('hours_active', 0)
+            mins = stats.get('minutes_active', 0)
+            time_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
+            message += f"   Session Active: {time_str}\n"
         
         # Footer
         message += f"\n{'='*30}\n"

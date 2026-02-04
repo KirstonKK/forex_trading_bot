@@ -13,6 +13,14 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+# Import database
+try:
+    from database.trades import TradesDatabase
+    DB_AVAILABLE = True
+except ImportError:
+    logger.warning("TradesDatabase not available, using JSON-only storage")
+    DB_AVAILABLE = False
+
 # Data file for persistence
 DATA_DIR = Path(__file__).parent.parent / 'data'
 REPORT_FILE = DATA_DIR / 'daily_report_data.json'
@@ -22,6 +30,17 @@ class DailyReportTracker:
     """Track trading activity for daily reports."""
     
     def __init__(self):
+        # Initialize database connection
+        if DB_AVAILABLE:
+            try:
+                self.db = TradesDatabase()
+                logger.info("Database connection initialized for signal storage")
+            except Exception as e:
+                logger.error(f"Failed to initialize database: {e}")
+                self.db = None
+        else:
+            self.db = None
+        
         self.reset_if_new_day()
     
     def reset_if_new_day(self):
@@ -79,7 +98,7 @@ class DailyReportTracker:
             logger.error(f"Error saving report data: {e}")
     
     def record_signal(self, signal: Dict[str, Any], symbol: str):
-        """Record a generated signal."""
+        """Record a generated signal in both JSON and database."""
         self.reset_if_new_day()
         
         signal_record = {
@@ -95,7 +114,16 @@ class DailyReportTracker:
             'timestamp': datetime.now().isoformat()
         }
         
+        # Save to JSON (for backward compatibility)
         self.data['signals_generated'].append(signal_record)
+        
+        # Save to database (persistent storage)
+        if self.db:
+            try:
+                self.db.save_signal(signal_record)
+                logger.info(f"Signal saved to database: {symbol} {signal.get('direction')}")
+            except Exception as e:
+                logger.error(f"Failed to save signal to database: {e}")
         
         # Record hourly activity
         hour = datetime.now().hour
@@ -153,35 +181,52 @@ class DailyReportTracker:
         """Get compiled data for daily report."""
         self.reset_if_new_day()
         
+        # Get signals from database if available (more reliable than JSON)
+        signals_from_db = []
+        if self.db:
+            try:
+                signals_from_db = self.db.get_signals(date=date.today().isoformat())
+                logger.info(f"Retrieved {len(signals_from_db)} signals from database")
+            except Exception as e:
+                logger.error(f"Failed to get signals from database: {e}")
+        
+        # Use DB signals if available, otherwise fall back to JSON
+        signals = signals_from_db if signals_from_db else self.data.get('signals_generated', [])
+        
         # Calculate hours active
         stats = self.data.get('session_stats', {})
         start = stats.get('start_time')
         end = stats.get('end_time')
         hours_active = 0
+        minutes_active = 0
         
         if start and end:
             try:
                 start_dt = datetime.fromisoformat(start)
                 end_dt = datetime.fromisoformat(end)
-                hours_active = (end_dt - start_dt).seconds // 3600
+                total_seconds = (end_dt - start_dt).total_seconds()
+                hours_active = int(total_seconds // 3600)
+                minutes_active = int((total_seconds % 3600) // 60)
             except:
                 pass
         
         stats['hours_active'] = hours_active
+        stats['minutes_active'] = minutes_active
         
         return {
             'date': self.data.get('date'),
-            'signals_generated': self.data.get('signals_generated', []),
+            'signals_generated': signals,
             'rejections_summary': dict(self.data.get('rejections', {})),
             'pair_analysis': self.data.get('pair_analysis', {}),
             'session_stats': stats,
             'hourly_activity': dict(self.data.get('hourly_activity', {})),
-            'market_sentiment': self._generate_sentiment()
+            'market_sentiment': self._generate_sentiment(signals)
         }
     
-    def _generate_sentiment(self) -> str:
+    def _generate_sentiment(self, signals: List[Dict] = None) -> str:
         """Generate market sentiment summary."""
-        signals = self.data.get('signals_generated', [])
+        if signals is None:
+            signals = self.data.get('signals_generated', [])
         
         if not signals:
             rejections = self.data.get('rejections', {})
