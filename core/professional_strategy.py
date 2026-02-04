@@ -252,7 +252,12 @@ class ProfessionalStrategy:
         
         stop_loss, sl_distance = sl_result
         daily_target = self._get_daily_target(candles, direction)
-        take_profit = daily_target if daily_target else entry + (sl_distance * 3 * (1 if direction == 'long' else -1))
+        
+        if daily_target:
+            take_profit = daily_target
+        else:
+            multiplier = 1 if direction == 'long' else -1
+            take_profit = entry + (sl_distance * 3 * multiplier)
         
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)

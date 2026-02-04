@@ -6,7 +6,7 @@ Paper trades alternative configurations for comparison.
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
@@ -150,9 +150,8 @@ class ABTestingFramework:
         self._save_state()
         logger.info(f"A/B Testing initialized with {len(self.variants)} variants")
     
-    def evaluate_setup(self, setup_data: Dict, candles: List[Dict], 
-                       choch_found: bool, confirmation_15m: bool,
-                       confidence: float, symbol: str) -> Dict[str, bool]:
+    def evaluate_setup(self, choch_found: bool, confirmation_15m: bool, 
+                       confidence: float) -> Dict[str, bool]:
         """
         Evaluate which variants would have taken this signal.
         
@@ -208,7 +207,7 @@ class ABTestingFramework:
         
         # Record result
         self.test_results.append({
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'variant_results': variant_results,
             'outcome': outcome,
             'pips': pips
@@ -237,7 +236,14 @@ class ABTestingFramework:
                 'win_rate': win_rate,
                 'total_pips': variant.pips,
                 'avg_pips': variant.pips / total_trades if total_trades > 0 else 0,
-                'status': 'outperforming' if win_rate > 60 else 'underperforming' if win_rate < 55 else 'neutral'
+                if win_rate > 60:
+                    status = 'outperforming'
+                elif win_rate < 55:
+                    status = 'underperforming'
+                else:
+                    status = 'neutral'
+                
+                'status': status
             }
         
         # Rank variants by win rate
@@ -265,7 +271,12 @@ class ABTestingFramework:
         for name in report.get('ranking', []):
             data = report['variants'][name]
             emoji = "🥇" if name == report.get('best_variant') else "📊"
-            status_emoji = "🟢" if data['status'] == 'outperforming' else "🔴" if data['status'] == 'underperforming' else "🟡"
+            if data['status'] == 'outperforming':
+                status_emoji = "🟢"
+            elif data['status'] == 'underperforming':
+                status_emoji = "🔴"
+            else:
+                status_emoji = "🟡"
             
             lines.extend([
                 "",

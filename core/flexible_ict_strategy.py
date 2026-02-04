@@ -682,10 +682,10 @@ class FlexibleICTStrategy:
         
         # Ensure sweep aligns with direction
         if direction == 'long' and sweep_type != 'low':
-            self._last_rejection_reasons.append(f"Sweep direction mismatch (need low sweep for long)")
+            self._last_rejection_reasons.append("Sweep direction mismatch (need low sweep for long)")
             return None
         if direction == 'short' and sweep_type != 'high':
-            self._last_rejection_reasons.append(f"Sweep direction mismatch (need high sweep for short)")
+            self._last_rejection_reasons.append("Sweep direction mismatch (need high sweep for short)")
             return None
         
         confirmations.append("LIQUIDITY_SWEEP")
@@ -872,7 +872,7 @@ class FlexibleICTStrategy:
             'htf_zone': tapped_zone
         }
     
-    def try_option_3(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+    def try_option_3(self, candles: List[dict]) -> Optional[Dict]:
         """
         Option 3: OB + FVG + Fib 79%
         
@@ -1176,7 +1176,7 @@ class FlexibleICTStrategy:
         
         # 1. Correlation Filter - prevent opposite signals on EU/GBP
         if self.check_correlation_conflict(symbol, direction, current_timestamp):
-            self._last_rejection_reasons.append(f"Correlation conflict (opposite signal on related pair)")
+            self._last_rejection_reasons.append("Correlation conflict (opposite signal on related pair)")
             return None
         
         # 2. 15M Confirmation - ensure 15M structure agrees

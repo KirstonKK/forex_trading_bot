@@ -49,13 +49,13 @@ class FlexibleICTBacktest:
         
         # Fetch different timeframes - use '60d' for 5m/15m (yfinance limit)
         try:
-            print(f"  Fetching 5M data...")
+            print("  Fetching 5M data...")
             data_5m = ticker.history(period='60d', interval='5m')
-            print(f"  Fetching 15M data...")
+            print("  Fetching 15M data...")
             data_15m = ticker.history(period='60d', interval='15m')
-            print(f"  Fetching 1H data...")
+            print("  Fetching 1H data...")
             data_1h = ticker.history(period='730d', interval='1h')
-            print(f"  Aggregating to 4H...")
+            print("  Aggregating to 4H...")
         except Exception as e:
             print(f"Error fetching data: {e}")
             return {}
@@ -131,7 +131,6 @@ class FlexibleICTBacktest:
         # Walk through 5M candles
         for i in range(min_candles, len(candles_5m)):
             current = candles_5m[i]
-            current_price = current['close']
             current_time = datetime.fromtimestamp(current['timestamp'])
             
             # Check if active trade hit SL or TP

@@ -91,7 +91,12 @@ class TelegramNotifier:
         ml_reasoning = signal.get('ml_reasoning', [])
         
         # Direction emoji
-        emoji = "🟢" if direction == "BUY" else "🔴" if direction == "SELL" else "⚪"
+        if direction == "BUY":
+            emoji = "🟢"
+        elif direction == "SELL":
+            emoji = "🔴"
+        else:
+            emoji = "⚪"
         
         # Format symbol nicely
         pair = symbol.replace('_', '/')
@@ -104,7 +109,12 @@ class TelegramNotifier:
         # ML section
         ml_section = ""
         if ml_confidence is not None:
-            risk_emoji = "🟢" if ml_recommendation == 'full_risk' else "🟡" if 'half' in ml_recommendation or 'quarter' in ml_recommendation else "🔴"
+            if ml_recommendation == 'full_risk':
+                risk_emoji = "🟢"
+            elif 'half' in ml_recommendation or 'quarter' in ml_recommendation:
+                risk_emoji = "🟡"
+            else:
+                risk_emoji = "🔴"
             ml_section = f"\n\n🤖 <b>ML Score:</b> {ml_confidence}% {risk_emoji}\n📊 <b>Risk:</b> {ml_recommendation.replace('_', ' ').title()}"
             if ml_reasoning:
                 ml_section += "\n" + "\n".join(ml_reasoning[:3])
@@ -149,7 +159,12 @@ class TelegramNotifier:
         
         pnl_text = ""
         if pnl is not None:
-            pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+            if pnl > 0:
+                pnl_emoji = "🟢"
+            elif pnl < 0:
+                pnl_emoji = "🔴"
+            else:
+                pnl_emoji = "⚪"
             pnl_text = f"\n💵 <b>P&L:</b> {pnl_emoji} {pnl:+.1f} points"
         
         message = f"""
@@ -199,7 +214,13 @@ class TelegramNotifier:
             pairs_tracked: List of pairs being tracked
         """
         win_rate = (wins / trades * 100) if trades > 0 else 0
-        pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+        
+        if pnl > 0:
+            pnl_emoji = "🟢"
+        elif pnl < 0:
+            pnl_emoji = "🔴"
+        else:
+            pnl_emoji = "⚪"
         
         message = f"""
 📊 <b>DAILY SUMMARY</b>
@@ -275,7 +296,13 @@ class TelegramNotifier:
             for pair, analysis in pair_analysis.items():
                 display_pair = pair.replace('_', '/')
                 bias = analysis.get('htf_bias', 'neutral')
-                bias_emoji = "🟢" if 'bullish' in bias.lower() else "🔴" if 'bearish' in bias.lower() else "⚪"
+                bias_lower = bias.lower()
+                if 'bullish' in bias_lower:
+                    bias_emoji = "🟢"
+                elif 'bearish' in bias_lower:
+                    bias_emoji = "🔴"
+                else:
+                    bias_emoji = "⚪"
                 
                 message += f"\n<b>{display_pair}</b> {bias_emoji}\n"
                 message += f"   HTF Bias: {bias}\n"

@@ -15,7 +15,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, send_from_directory
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import json
 import requests
@@ -100,6 +100,10 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# Constants
+MSG_FAILED_TO_SEND = 'Failed to send'
+MSG_ML_NOT_AVAILABLE = 'ML Risk Model not available'
 logger = logging.getLogger(__name__)
 
 # Resolve absolute paths
@@ -375,7 +379,7 @@ def webhook():
                 try:
                     tracker = get_report_tracker()
                     tracker.record_stats('candles_analyzed')
-                except:
+                except Exception:
                     pass
             
             # Keep last 100 candles only
@@ -418,8 +422,16 @@ def webhook():
                 if ML_RISK_AVAILABLE and ml_score_signal:
                     try:
                         # Build market context for ML
+                        current_hour = datetime.now(timezone.utc).hour
+                        if 10 <= current_hour < 14:
+                            session = 'LONDON'
+                        elif 14 <= current_hour < 17:
+                            session = 'NY'
+                        else:
+                            session = 'OFF'
+                        
                         market_context = {
-                            'session': 'LONDON' if 10 <= datetime.utcnow().hour < 14 else 'NY' if 14 <= datetime.utcnow().hour < 17 else 'OFF',
+                            'session': session,
                             'atr': 1.0,  # Would calculate from candles
                             'avg_atr': 1.0,
                             'trend_strength': 0.5,  # Would calculate from HTF
@@ -461,7 +473,7 @@ def webhook():
                 # Add futures note for gold
                 if 'XAU' in symbol:
                     signal['price_note'] = "Futures price - spot typically ~$30-40 lower"
-                    logger.info(f"   ⚠️ Note: Futures price - spot typically ~$30-40 lower")
+                    logger.info("   ⚠️ Note: Futures price - spot typically ~$30-40 lower")
                 
                 # Normalize signal structure for frontend
                 signal['type'] = signal['direction']
@@ -672,7 +684,7 @@ def get_daily_report():
             telegram_group_notifier.send_daily_report(report_data)
         return jsonify({
             'status': 'success' if success else 'error',
-            'message': 'Report sent to Telegram' if success else 'Failed to send',
+            'message': 'Report sent to Telegram' if success else MSG_FAILED_TO_SEND,
             'report': report_data
         })
     
@@ -756,7 +768,7 @@ def get_weekly_report():
         
         return jsonify({
             'status': 'success' if success else 'error',
-            'message': 'Weekly report sent to Telegram' if success else 'Failed to send',
+            'message': 'Weekly report sent to Telegram' if success else MSG_FAILED_TO_SEND,
             'report': reporter.get_weekly_stats()
         })
     
@@ -793,7 +805,7 @@ def get_ab_test():
         
         return jsonify({
             'status': 'success' if success else 'error',
-            'message': 'A/B report sent to Telegram' if success else 'Failed to send'
+            'message': 'A/B report sent to Telegram' if success else MSG_FAILED_TO_SEND
         })
     
     # GET returns comparison
@@ -808,7 +820,7 @@ def get_ab_test():
 def get_ml_stats():
     """Get ML risk model statistics."""
     if not ML_RISK_AVAILABLE or not get_ml_risk_model:
-        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+        return jsonify({'status': 'error', 'message': MSG_ML_NOT_AVAILABLE}), 500
     
     model = get_ml_risk_model()
     stats = model.get_model_stats()
@@ -823,7 +835,7 @@ def get_ml_stats():
 def train_ml_model():
     """Manually trigger ML model training."""
     if not ML_RISK_AVAILABLE or not get_ml_risk_model:
-        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+        return jsonify({'status': 'error', 'message': MSG_ML_NOT_AVAILABLE}), 500
     
     model = get_ml_risk_model()
     result = model.train()
@@ -847,7 +859,7 @@ def train_ml_model():
 def log_ml_trade():
     """Log a trade outcome for ML training."""
     if not ML_RISK_AVAILABLE or not get_ml_risk_model:
-        return jsonify({'status': 'error', 'message': 'ML Risk Model not available'}), 500
+        return jsonify({'status': 'error', 'message': MSG_ML_NOT_AVAILABLE}), 500
     
     data = request.json
     if not data:
@@ -1090,15 +1102,16 @@ if __name__ == '__main__':
         """Background thread to send daily reports at end of session."""
         # Initialize to today to prevent immediate report on restart
         from datetime import datetime as dt_inner
-        last_report_date = dt_inner.utcnow().date()
-        last_weekly_date = dt_inner.utcnow().date() if dt_inner.utcnow().weekday() == 6 else None
+        now_dt = dt_inner.now(timezone.utc)
+        last_report_date = now_dt.date()
+        last_weekly_date = now_dt.date() if now_dt.weekday() == 6 else None
         
         # Wait 5 minutes before first check to avoid startup spam
         time_module.sleep(300)
         
         while True:
             try:
-                now = dt.utcnow()
+                now = dt.now(timezone.utc)
                 today = now.date()
                 
                 # Send report after 17:00 UTC (session close) 
@@ -1162,7 +1175,6 @@ if __name__ == '__main__':
         
         last_update_id = 0
         ADMIN_USER_ID = '117216462'  # Your Telegram USER ID (not chat ID)
-        GROUP_CHAT_ID = TELEGRAM_GROUP_ID  # Group chat ID
         
         logger.info("🤖 Telegram command handler started")
         
@@ -1243,8 +1255,7 @@ if __name__ == '__main__':
                         )
                     
                     elif text == '/session':
-                        now = datetime.utcnow()
-                        session_start = now.replace(hour=10, minute=0, second=0)
+                        now = datetime.now(timezone.utc)
                         session_end = now.replace(hour=17, minute=0, second=0)
                         
                         if 10 <= now.hour < 17 and now.weekday() < 4:
@@ -1345,7 +1356,7 @@ if __name__ == '__main__':
                                 telegram_notifier.send_message(ml_text)
                             response_text = "🤖 ML stats sent!"
                         else:
-                            response_text = "❌ ML Risk Model not available"
+                            response_text = f"❌ {MSG_ML_NOT_AVAILABLE}"
                     
                     elif text == '/weekly':
                         # Send weekly report

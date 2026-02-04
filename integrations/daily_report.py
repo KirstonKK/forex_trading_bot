@@ -6,7 +6,7 @@ Collects data throughout the trading day for end-of-day report.
 import os
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 from collections import defaultdict
@@ -207,7 +207,7 @@ class DailyReportTracker:
                 total_seconds = (end_dt - start_dt).total_seconds()
                 hours_active = int(total_seconds // 3600)
                 minutes_active = int((total_seconds % 3600) // 60)
-            except:
+            except (KeyError, ValueError, TypeError):
                 pass
         
         stats['hours_active'] = hours_active
@@ -248,7 +248,7 @@ class DailyReportTracker:
     
     def should_send_report(self) -> bool:
         """Check if it's time to send the daily report (after 17:00 UTC)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         hour = now.hour
         
         # Send report after session close (17:00 UTC) and before midnight
