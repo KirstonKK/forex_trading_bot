@@ -122,6 +122,10 @@ class FlexibleICTBacktest:
         
         print(f"Data loaded: 5M={len(mtf_data['5M'])}, 15M={len(mtf_data['15M'])}, 1H={len(mtf_data['1H'])}, 4H={len(mtf_data['4H'])} candles")
         
+        # Point value for P&L calculation - Gold vs Forex
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        point_value = 0.01 if is_gold else 0.00001
+        
         candles_5m = mtf_data['5M']
         trades = []
         active_trade = None
@@ -140,7 +144,7 @@ class FlexibleICTBacktest:
                         # Hit SL
                         active_trade.exit_price = active_trade.stop_loss
                         active_trade.exit_time = current_time
-                        active_trade.pnl_points = (active_trade.stop_loss - active_trade.entry_price) / 0.00001
+                        active_trade.pnl_points = (active_trade.stop_loss - active_trade.entry_price) / point_value
                         active_trade.result = 'LOSS'
                         trades.append(active_trade)
                         active_trade = None
@@ -149,7 +153,7 @@ class FlexibleICTBacktest:
                         # Hit TP
                         active_trade.exit_price = active_trade.take_profit
                         active_trade.exit_time = current_time
-                        active_trade.pnl_points = (active_trade.take_profit - active_trade.entry_price) / 0.00001
+                        active_trade.pnl_points = (active_trade.take_profit - active_trade.entry_price) / point_value
                         active_trade.result = 'WIN'
                         trades.append(active_trade)
                         active_trade = None
@@ -159,7 +163,7 @@ class FlexibleICTBacktest:
                         # Hit SL
                         active_trade.exit_price = active_trade.stop_loss
                         active_trade.exit_time = current_time
-                        active_trade.pnl_points = (active_trade.entry_price - active_trade.stop_loss) / 0.00001
+                        active_trade.pnl_points = (active_trade.entry_price - active_trade.stop_loss) / point_value
                         active_trade.result = 'LOSS'
                         trades.append(active_trade)
                         active_trade = None
@@ -168,7 +172,7 @@ class FlexibleICTBacktest:
                         # Hit TP
                         active_trade.exit_price = active_trade.take_profit
                         active_trade.exit_time = current_time
-                        active_trade.pnl_points = (active_trade.entry_price - active_trade.take_profit) / 0.00001
+                        active_trade.pnl_points = (active_trade.entry_price - active_trade.take_profit) / point_value
                         active_trade.result = 'WIN'
                         trades.append(active_trade)
                         active_trade = None
@@ -200,8 +204,8 @@ class FlexibleICTBacktest:
             if len(window_mtf['4H']) < 10 or len(window_mtf['1H']) < 20:
                 continue
             
-            # Analyze for signal
-            signal = self.strategy.analyze(window_mtf['5M'], symbol, window_mtf)
+            # Analyze for signal (backtest_mode=True to use candle timestamps)
+            signal = self.strategy.analyze(window_mtf['5M'], symbol, window_mtf, backtest_mode=True)
             
             if signal:
                 active_trade = BacktestTrade(

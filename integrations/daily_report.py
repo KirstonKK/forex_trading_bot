@@ -63,7 +63,8 @@ class DailyReportTracker:
                     'valid_sweeps': 0,
                     'valid_bos': 0,
                     'start_time': None,
-                    'end_time': None
+                    'end_time': None,
+                    'trading_minutes': 0  # Time spent in trading window (10-17 UTC)
                 },
                 'hourly_activity': defaultdict(int),
                 'last_rejection_reasons': {}  # Per-pair last rejection
@@ -170,10 +171,18 @@ class DailyReportTracker:
             self.data['session_stats'][stat_type] += count
         
         # Update session times
-        now = datetime.now().isoformat()
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        
         if not self.data['session_stats']['start_time']:
-            self.data['session_stats']['start_time'] = now
-        self.data['session_stats']['end_time'] = now
+            self.data['session_stats']['start_time'] = now_str
+        self.data['session_stats']['end_time'] = now_str
+        
+        # Track trading window time (10:00-17:00 UTC)
+        if 10 <= now.hour < 17:
+            # Add 5 minutes (typical candle interval) to trading time
+            self.data['session_stats']['trading_minutes'] = \
+                self.data['session_stats'].get('trading_minutes', 0) + 5
         
         self._save_data()
     
@@ -193,22 +202,13 @@ class DailyReportTracker:
         # Use DB signals if available, otherwise fall back to JSON
         signals = signals_from_db if signals_from_db else self.data.get('signals_generated', [])
         
-        # Calculate hours active
+        # Calculate hours active in trading window (10:00-17:00 UTC)
         stats = self.data.get('session_stats', {})
-        start = stats.get('start_time')
-        end = stats.get('end_time')
-        hours_active = 0
-        minutes_active = 0
         
-        if start and end:
-            try:
-                start_dt = datetime.fromisoformat(start)
-                end_dt = datetime.fromisoformat(end)
-                total_seconds = (end_dt - start_dt).total_seconds()
-                hours_active = int(total_seconds // 3600)
-                minutes_active = int((total_seconds % 3600) // 60)
-            except (KeyError, ValueError, TypeError):
-                pass
+        # Use trading_minutes which tracks actual time in trading window
+        trading_mins = stats.get('trading_minutes', 0)
+        hours_active = trading_mins // 60
+        minutes_active = trading_mins % 60
         
         stats['hours_active'] = hours_active
         stats['minutes_active'] = minutes_active

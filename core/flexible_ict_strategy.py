@@ -109,6 +109,7 @@ class FlexibleICTStrategy:
         self._last_sweep_found = False  # Track if sweep was detected
         self._last_bos_found = False    # Track if BoS was detected
         self.current_date = None
+        self.current_symbol = 'EURUSD'  # Track current symbol for pip calculations
         # Store multi-timeframe data
         self.mtf_data = {}  # {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
         
@@ -127,6 +128,28 @@ class FlexibleICTStrategy:
         
         # Fixed R:R - DO NOT CHANGE (60% win rate achieved with 1:2)
         self.target_rr = 2.0  # 1:2 R:R - backtested
+    
+    def get_pip_value(self, symbol: str = None) -> float:
+        """
+        Get pip value for the symbol.
+        - Forex pairs (EURUSD, GBPUSD): 0.0001 (4th decimal)
+        - Gold (XAUUSD): 0.10 ($0.10 per point)
+        """
+        sym = symbol or self.current_symbol
+        if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
+            return 0.10  # Gold moves in $0.10 increments
+        return 0.0001  # Standard forex pairs
+    
+    def get_point_value(self, symbol: str = None) -> float:
+        """
+        Get point value for the symbol (smaller unit for SL/TP calculations).
+        - Forex pairs: 0.00001 (5th decimal)
+        - Gold: 0.01 ($0.01)
+        """
+        sym = symbol or self.current_symbol
+        if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
+            return 0.01  # Gold point value
+        return 0.00001  # Standard forex pairs
     
     def set_mtf_data(self, mtf_data: Dict[str, List[dict]]):
         """Set multi-timeframe data for analysis."""
@@ -457,7 +480,7 @@ class FlexibleICTStrategy:
         highs = [c['high'] for c in recent]
         lows = [c['low'] for c in recent]
         
-        pip_value = 0.0001
+        pip_value = self.get_pip_value()
         eq_tolerance = 3 * pip_value  # 3 pips - for finding EQUAL levels
         zone_tolerance = 5 * pip_value  # 5 pips - for price at zone
         
@@ -709,7 +732,7 @@ class FlexibleICTStrategy:
         
         # 5. Price must be at FRESH FVG or OB for entry (not stale zones)
         current_price = candles[-1]['close']
-        pip_value = 0.0001
+        pip_value = self.get_pip_value()
         tolerance = 10 * pip_value  # 10 pips tolerance (tighter for precision)
         
         # Find the swept level (liquidity that was taken)
@@ -977,12 +1000,15 @@ class FlexibleICTStrategy:
         """
         Calculate SL/TP based on ICT principles:
         - SL: Beyond the liquidity sweep level (swing high/low that was swept)
-        - TP: 3x the risk (1:3 RR)
+        - TP: 2x the risk (1:2 RR)
         
-        HTF_LIQUIDITY_BOS gets tighter SL (5-7 pips) due to high confidence (95%)
+        HTF_LIQUIDITY_BOS gets tighter SL due to high confidence (95%)
+        Gold uses different pip/point values than forex pairs.
         """
         direction = setup_data['direction']
-        pip_value = 0.10 if symbol == 'XAUUSD' else 0.0001
+        pip_value = self.get_pip_value(symbol)
+        point_value = self.get_point_value(symbol)
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
         is_long = direction == 'long'
         setup_type = setup_data['setup_type'].value if hasattr(setup_data['setup_type'], 'value') else str(setup_data['setup_type'])
         
@@ -1004,12 +1030,13 @@ class FlexibleICTStrategy:
                 sweep_level = min(c['low'] for c in recent) if is_long else max(c['high'] for c in recent)
         
         # Apply buffer beyond the sweep level
-        # HTF_LIQUIDITY_BOS: 3 pip buffer (tighter for high confidence)
-        # Other setups: 5 pip buffer (standard)
-        if setup_type == 'HTF_LIQUIDITY_BOS':
-            buffer = 0.0003  # 3 pips buffer for high-confidence setups
+        # Gold: $5-10 buffer (Gold is volatile, needs room), Forex: 3-5 pips buffer
+        if is_gold:
+            buffer = 5.00 if setup_type == 'HTF_LIQUIDITY_BOS' else 10.00  # $5-10 buffer for Gold
+        elif setup_type == 'HTF_LIQUIDITY_BOS':
+            buffer = 3 * pip_value  # 3 pips buffer for high-confidence forex
         else:
-            buffer = 0.0005  # 5 pips buffer for standard setups
+            buffer = 5 * pip_value  # 5 pips buffer for standard forex
         
         if is_long:
             stop_loss = sweep_level - buffer  # SL below the swept low
@@ -1017,20 +1044,25 @@ class FlexibleICTStrategy:
             stop_loss = sweep_level + buffer  # SL above the swept high
         
         sl_distance = abs(entry - stop_loss)
-        # Points = 5th decimal (0.00001), 1 pip = 10 points
-        point_value = 0.00001
         sl_points = sl_distance / point_value
         
-        # Max SL limits by pair (in points, 10 points = 1 pip)
-        # EUR/USD, GBP/USD: 25 pips max = 250 points
-        # XAUUSD uses different calculation
-        # HTF_LIQUIDITY_BOS: Tighter limits (5-7 pips) for precision
-        if setup_type == 'HTF_LIQUIDITY_BOS':
-            max_sl_points = 70   # 7 pips max for HTF_LIQUIDITY_BOS
-            min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+        # Max SL limits - different for Gold vs Forex
+        # Gold at $5000 needs $15-50 SL (0.3%-1% of price) to avoid noise
+        if is_gold:
+            if setup_type == 'HTF_LIQUIDITY_BOS':
+                max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS
+                min_sl_points = 1500   # $15 min
+            else:
+                max_sl_points = 5000   # $50 max for other setups
+                min_sl_points = 2000   # $20 min
         else:
-            max_sl_points = 250  # 25 pips max for other setups
-            min_sl_points = 80   # 8 pips min (too tight = noise)
+            # Forex: 5-25 pips SL range
+            if setup_type == 'HTF_LIQUIDITY_BOS':
+                max_sl_points = 70   # 7 pips max for HTF_LIQUIDITY_BOS
+                min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+            else:
+                max_sl_points = 250  # 25 pips max for other setups
+                min_sl_points = 80   # 8 pips min (too tight = noise)
         
         # Validate SL range
         if sl_points < min_sl_points:
@@ -1047,19 +1079,25 @@ class FlexibleICTStrategy:
             sl_distance = max_sl_distance
             sl_points = max_sl_points
         
-        # Calculate TP with 1:2 RR - better win rate
-        # 1:2 RR requires 33% win rate to break even
-        if direction == 'long':
-            take_profit = entry + (sl_distance * 2.0)
+        # Calculate TP - Gold uses 1:1.5 RR (higher win rate), Forex uses 1:2
+        # Gold is more volatile, tighter TP = higher probability of hitting
+        if is_gold:
+            rr_multiplier = 1.5  # 1:1.5 for Gold
         else:
-            take_profit = entry - (sl_distance * 2.0)
+            rr_multiplier = 2.0  # 1:2 for Forex
+        
+        if direction == 'long':
+            take_profit = entry + (sl_distance * rr_multiplier)
+        else:
+            take_profit = entry - (sl_distance * rr_multiplier)
         
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)
         rr_ratio = reward / risk if risk > 0 else 0
         
-        # Minimum 1.8 RR to ensure quality setups
-        if rr_ratio < 1.8:
+        # Minimum RR check - Gold: 1.3, Forex: 1.8
+        min_rr = 1.3 if is_gold else 1.8
+        if rr_ratio < min_rr:
             return None, None, 0
         
         return stop_loss, take_profit, rr_ratio
@@ -1095,7 +1133,7 @@ class FlexibleICTStrategy:
         """Record that a trade was taken for a symbol today."""
         self.trades_today[symbol] = self.trades_today.get(symbol, 0) + 1
     
-    def analyze(self, candles: List[dict], symbol: str = 'EURUSD', mtf_data: Dict[str, List[dict]] = None) -> Optional[Dict]:
+    def analyze(self, candles: List[dict], symbol: str = 'EURUSD', mtf_data: Dict[str, List[dict]] = None, backtest_mode: bool = False) -> Optional[Dict]:
         """
         Main analysis - Try all 3 options in order of priority.
         
@@ -1106,11 +1144,15 @@ class FlexibleICTStrategy:
             candles: Base candles (5M) for fallback
             symbol: Trading pair
             mtf_data: Multi-timeframe data {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
+            backtest_mode: If True, use candle timestamp for session checks instead of current time
         """
         # Reset rejection reasons and stats flags
         self._last_rejection_reasons = []
         self._last_sweep_found = False
         self._last_bos_found = False
+        
+        # Set current symbol for pip calculations
+        self.current_symbol = symbol
         
         # Set multi-timeframe data if provided
         if mtf_data:
@@ -1123,10 +1165,12 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Insufficient data (need 50+ candles)")
             return None
         
-        # Use CURRENT time for session checks, not candle timestamp
-        # This ensures we check against actual current time, not delayed data
-        current_timestamp = int(datetime.now(timezone.utc).timestamp())
+        # Use candle timestamp for backtest, current time for live trading
         candle_timestamp = base_candles[-1]['timestamp']
+        if backtest_mode:
+            current_timestamp = candle_timestamp  # Use candle time for backtests
+        else:
+            current_timestamp = int(datetime.now(timezone.utc).timestamp())
         
         # ===== SESSION CHECK FIRST - Must be in trading hours =====
         can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
@@ -1139,10 +1183,12 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append(f"Signal cooldown ({self._signal_cooldown_minutes}min between signals)")
             return None
         
-        # ===== NEWS FILTER - Check for high-impact events =====
-        is_blackout, news_reason = is_news_blackout(symbol)
-        if is_blackout:
-            self._last_rejection_reasons.append(news_reason)
+        # ===== NEWS FILTER - Check for high-impact events (skip in backtest) =====
+        if not backtest_mode:
+            is_blackout, news_reason = is_news_blackout(symbol)
+            if is_blackout:
+                self._last_rejection_reasons.append(news_reason)
+                return None
             return None
         
         # Check if we already took a trade for this symbol today

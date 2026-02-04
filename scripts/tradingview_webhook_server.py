@@ -1106,15 +1106,68 @@ if __name__ == '__main__':
         last_report_date = now_dt.date()
         last_weekly_date = now_dt.date() if now_dt.weekday() == 6 else None
         
-        # Wait 5 minutes before first check to avoid startup spam
-        time_module.sleep(300)
+        # Track session alerts (prevent duplicates)
+        last_session_start_date = now_dt.date() if 10 <= now_dt.hour < 17 else None
+        last_session_end_date = now_dt.date() if now_dt.hour >= 17 else None
+        
+        # Wait 2 minutes before first check to allow startup
+        time_module.sleep(120)
         
         while True:
             try:
                 now = dt.now(timezone.utc)
                 today = now.date()
                 
-                # Send report after 17:00 UTC (session close) 
+                # === SESSION START ALERT (10:00 UTC) ===
+                # Only on weekdays (Mon-Fri) and if not already sent today
+                if now.hour == 10 and now.minute < 30 and now.weekday() < 5:
+                    if last_session_start_date != today:
+                        session_msg = (
+                            "🟢 <b>Trading Session Started</b>\n\n"
+                            f"⏰ {now.strftime('%H:%M')} UTC | {now.strftime('%A')}\n"
+                            f"📊 Session: 10:00 - 17:00 UTC\n"
+                            f"🎯 Pairs: EUR/USD, GBP/USD\n\n"
+                            "<i>Actively scanning for ICT setups...</i>"
+                        )
+                        if telegram_notifier:
+                            telegram_notifier.send_message(session_msg)
+                        if telegram_group_notifier:
+                            telegram_group_notifier.send_message(session_msg)
+                        logger.info("🟢 Session start alert sent")
+                        last_session_start_date = today
+                
+                # === SESSION END ALERT (17:00 UTC) ===
+                # Only on weekdays and if not already sent today
+                if now.hour == 17 and now.minute < 30 and now.weekday() < 5:
+                    if last_session_end_date != today:
+                        # Get session stats
+                        session_stats_msg = ""
+                        if REPORT_TRACKER_AVAILABLE and get_report_tracker:
+                            tracker = get_report_tracker()
+                            report = tracker.get_report_data()
+                            stats = report.get('session_stats', {})
+                            signals = report.get('signals_generated', [])
+                            session_stats_msg = (
+                                f"\n📈 <b>Session Summary:</b>\n"
+                                f"   Signals: {len(signals)}\n"
+                                f"   Candles: {stats.get('candles_analyzed', 0)}\n"
+                                f"   Setups: {stats.get('setups_checked', 0)}\n"
+                            )
+                        
+                        end_msg = (
+                            "🔴 <b>Trading Session Ended</b>\n\n"
+                            f"⏰ {now.strftime('%H:%M')} UTC | {now.strftime('%A')}"
+                            f"{session_stats_msg}\n"
+                            "<i>Monitoring mode until next session...</i>"
+                        )
+                        if telegram_notifier:
+                            telegram_notifier.send_message(end_msg)
+                        if telegram_group_notifier:
+                            telegram_group_notifier.send_message(end_msg)
+                        logger.info("🔴 Session end alert sent")
+                        last_session_end_date = today
+                
+                # Send daily report after 17:00 UTC (session close) 
                 if now.hour >= 17 and last_report_date != today:
                     if REPORT_TRACKER_AVAILABLE and get_report_tracker:
                         tracker = get_report_tracker()
