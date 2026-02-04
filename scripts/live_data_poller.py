@@ -9,11 +9,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 import yfinance as yf
 import pandas as pd
+
+try:
+    import pytz
+    EST = pytz.timezone('America/New_York')
+except ImportError:
+    # Fallback: use fixed UTC offset for EST (-5 hours)
+    EST = timezone(timedelta(hours=-5))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +34,73 @@ WEBHOOK_SECRET = "your_secret_key_here"
 
 # Currency pairs to track
 PAIRS = ['EURUSD', 'GBPUSD', 'XAUUSD']
+
+
+def is_forex_market_open():
+    """
+    Check if forex markets are currently open.
+    Forex markets are open from Sunday 5pm EST to Friday 5pm EST.
+    Returns: (is_open: bool, next_open: datetime or None, message: str)
+    """
+    now_est = datetime.now(EST)
+    weekday = now_est.weekday()  # Monday=0, Sunday=6
+    hour = now_est.hour
+    
+    # Market is CLOSED:
+    # - Friday after 5pm EST (weekday=4, hour >= 17)
+    # - All day Saturday (weekday=5)
+    # - Sunday before 5pm EST (weekday=6, hour < 17)
+    
+    if weekday == 4 and hour >= 17:  # Friday after 5pm
+        # Calculate time until Sunday 5pm
+        days_until_sunday = 2
+        next_open = now_est.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+        return False, next_open, "Market closed (Friday 5pm EST)"
+    
+    elif weekday == 5:  # Saturday
+        # Calculate time until Sunday 5pm
+        days_until_sunday = 1
+        next_open = now_est.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+        return False, next_open, "Market closed (Weekend - Saturday)"
+    
+    elif weekday == 6 and hour < 17:  # Sunday before 5pm
+        next_open = now_est.replace(hour=17, minute=0, second=0, microsecond=0)
+        return False, next_open, "Market closed (Sunday before 5pm EST)"
+    
+    # Market is open
+    return True, None, "Market is open"
+
+
+def wait_for_market_open():
+    """
+    Sleep until forex market opens. Logs status every hour while waiting.
+    """
+    is_open, next_open, message = is_forex_market_open()
+    
+    if is_open:
+        return True
+    
+    logger.info(f"🌙 {message}")
+    
+    if next_open:
+        time_until_open = (next_open - datetime.now(EST)).total_seconds()
+        hours_until = time_until_open / 3600
+        logger.info(f"⏰ Market opens at {next_open.strftime('%A %I:%M %p EST')} ({hours_until:.1f} hours)")
+        logger.info("💤 Entering weekend sleep mode...")
+        
+        # Sleep in 1-hour chunks so we can log status
+        while time_until_open > 0:
+            sleep_time = min(3600, time_until_open)  # Sleep max 1 hour at a time
+            time.sleep(sleep_time)
+            time_until_open -= sleep_time
+            
+            if time_until_open > 0:
+                hours_left = time_until_open / 3600
+                logger.info(f"💤 Still waiting... {hours_left:.1f} hours until market opens")
+        
+        logger.info("🌅 Market is opening! Resuming polling...")
+    
+    return True
 
 # Use yfinance for real-time forex futures data
 import yfinance as yf
@@ -216,6 +290,16 @@ def poll_live_data():
     
     while True:
         try:
+            # Check if forex market is open (weekday detection)
+            is_open, next_open, message = is_forex_market_open()
+            if not is_open:
+                wait_for_market_open()
+                # Reset update timers after weekend
+                last_15m_update = {}
+                last_1h_update = {}
+                last_4h_update = {}
+                continue
+            
             for pair in PAIRS:
                 # Parse currency pair
                 base = pair[:3]
@@ -293,9 +377,18 @@ if __name__ == '__main__':
     print("\n" + "="*70)
     print("LIVE FOREX DATA POLLER")
     print("="*70)
-    print("Fetching real-time forex rates from exchangerate-api.com")
+    print("Fetching real-time forex rates from yfinance")
     print(f"Sending to: {WEBHOOK_URL}")
     print(f"Tracking: {', '.join(PAIRS)}")
+    
+    # Show market status
+    is_open, next_open, message = is_forex_market_open()
+    if is_open:
+        print("📈 Market Status: OPEN")
+    else:
+        print(f"🌙 Market Status: CLOSED - {message}")
+        if next_open:
+            print(f"⏰ Opens: {next_open.strftime('%A %I:%M %p EST')}")
     print("="*70 + "\n")
     
     # Check if server is running
