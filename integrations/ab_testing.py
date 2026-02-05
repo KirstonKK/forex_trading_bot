@@ -227,6 +227,14 @@ class ABTestingFramework:
             total_trades = variant.wins + variant.losses
             win_rate = (variant.wins / total_trades * 100) if total_trades > 0 else 0
             
+            # Determine status based on win rate
+            if win_rate > 60:
+                status = 'outperforming'
+            elif win_rate < 55:
+                status = 'underperforming'
+            else:
+                status = 'neutral'
+            
             report['variants'][name] = {
                 'description': variant.description,
                 'signals_matched': variant.signals_matched,
@@ -236,13 +244,6 @@ class ABTestingFramework:
                 'win_rate': win_rate,
                 'total_pips': variant.pips,
                 'avg_pips': variant.pips / total_trades if total_trades > 0 else 0,
-                if win_rate > 60:
-                    status = 'outperforming'
-                elif win_rate < 55:
-                    status = 'underperforming'
-                else:
-                    status = 'neutral'
-                
                 'status': status
             }
         
