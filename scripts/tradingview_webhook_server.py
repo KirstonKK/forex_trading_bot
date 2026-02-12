@@ -91,6 +91,15 @@ except ImportError:
     get_ml_risk_model = None
     ml_score_signal = None
 
+# Import Trades Database for persistent signal storage
+try:
+    from database.trades import TradesDatabase
+    trades_db = TradesDatabase(db_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'trading.db'))
+    DB_AVAILABLE = True
+except ImportError:
+    trades_db = None
+    DB_AVAILABLE = False
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -188,13 +197,52 @@ def load_signals():
             with open(SIGNALS_FILE, 'r') as f:
                 active_signals = json.load(f)
             # Update signal counter to avoid ID collisions
+            # Signal IDs are like EUR_USD_1_1770900978 (symbol_counter_timestamp)
             if active_signals:
-                max_counter = max(int(s['id'].split('_')[2]) for s in active_signals.values() if '_' in s['id'])
-                signal_counter = max_counter + 1
+                counters = []
+                for s in active_signals.values():
+                    parts = s['id'].split('_')
+                    # Counter is second-to-last part (before timestamp)
+                    if len(parts) >= 4:
+                        try:
+                            counters.append(int(parts[-2]))
+                        except (ValueError, IndexError):
+                            pass
+                if counters:
+                    signal_counter = max(counters) + 1
+            # Prune old signals (older than 7 days)
+            prune_old_signals()
             logger.info(f"Loaded {len(active_signals)} signals from disk")
     except Exception as e:
         logger.warning(f"Could not load signals: {e}")
         active_signals = {}
+
+def prune_old_signals():
+    """Remove signals older than 7 days to prevent unbounded growth."""
+    global active_signals
+    now = datetime.now(timezone.utc)
+    to_remove = []
+    for sig_id, sig in active_signals.items():
+        try:
+            sig_time = sig.get('detected_at') or sig.get('timestamp')
+            if isinstance(sig_time, str):
+                sig_dt = datetime.fromisoformat(sig_time.replace('Z', '+00:00'))
+            elif isinstance(sig_time, (int, float)):
+                sig_dt = datetime.fromtimestamp(sig_time, tz=timezone.utc)
+            else:
+                continue
+            # Make timezone-aware if not already
+            if sig_dt.tzinfo is None:
+                sig_dt = sig_dt.replace(tzinfo=timezone.utc)
+            if (now - sig_dt).days > 7:
+                to_remove.append(sig_id)
+        except Exception:
+            pass
+    for sig_id in to_remove:
+        del active_signals[sig_id]
+    if to_remove:
+        save_signals()
+        logger.info(f"Pruned {len(to_remove)} old signals (>7 days)")
 
 # Store market data in memory
 market_data = {}
@@ -248,21 +296,48 @@ def add_signal_to_history(signal, symbol):
     return signal_id
 
 def mark_signal_executed(signal_id):
-    """Mark a signal as executed."""
+    """Mark a signal as executed in both active_signals and DB."""
     if signal_id in active_signals:
-        active_signals[signal_id]['status'] = 'executed'
-        active_signals[signal_id]['executed_at'] = datetime.now().isoformat()
-        save_signals()  # Persist to disk
+        sig = active_signals[signal_id]
+        sig['status'] = 'executed'
+        sig['executed_at'] = datetime.now(timezone.utc).isoformat()
+        save_signals()
+        
+        # Also update in SQLite database
+        if DB_AVAILABLE and trades_db:
+            try:
+                trades_db.update_signal_status(
+                    symbol=sig.get('symbol', ''),
+                    entry_price=sig.get('entry', sig.get('entry_price', 0)),
+                    executed=True,
+                    trade_id=signal_id
+                )
+            except Exception as e:
+                logger.error(f"DB update failed for executed signal: {e}")
+        
         logger.info(f"✅ Signal executed: {signal_id}")
         return True
     return False
 
 def cancel_signal(signal_id):
-    """Cancel a pending signal."""
+    """Cancel a pending signal in both active_signals and DB."""
     if signal_id in active_signals:
-        active_signals[signal_id]['status'] = 'cancelled'
-        active_signals[signal_id]['cancelled_at'] = datetime.now().isoformat()
-        save_signals()  # Persist to disk
+        sig = active_signals[signal_id]
+        sig['status'] = 'cancelled'
+        sig['cancelled_at'] = datetime.now(timezone.utc).isoformat()
+        save_signals()
+        
+        # Also update in SQLite database
+        if DB_AVAILABLE and trades_db:
+            try:
+                trades_db.update_signal_status(
+                    symbol=sig.get('symbol', ''),
+                    entry_price=sig.get('entry', sig.get('entry_price', 0)),
+                    executed=False
+                )
+            except Exception as e:
+                logger.error(f"DB update failed for cancelled signal: {e}")
+        
         logger.info(f"❌ Signal cancelled: {signal_id}")
         return True
     return False
@@ -503,6 +578,27 @@ def webhook():
                     except Exception as e:
                         logger.error(f"Telegram group notification failed: {e}")
                 
+                # Save signal to SQLite database
+                if DB_AVAILABLE and trades_db:
+                    try:
+                        signal_for_db = {
+                            'symbol': symbol,
+                            'direction': signal.get('direction', 'UNKNOWN'),
+                            'entry_price': signal.get('entry_price', 0),
+                            'stop_loss': signal.get('stop_loss', 0),
+                            'take_profit': signal.get('take_profit', 0),
+                            'confidence': signal.get('confidence', 0),
+                            'setup_type': signal.get('setup_type', ''),
+                            'risk_reward': signal.get('risk_reward', 0),
+                            'confirmations': signal.get('confirmations', []),
+                            'executed': False,
+                            'trade_id': None
+                        }
+                        trades_db.save_signal(signal_for_db)
+                        logger.info(f"💾 Signal saved to database for {symbol}")
+                    except Exception as e:
+                        logger.error(f"DB save failed: {e}")
+                
                 return jsonify({
                     'status': 'signal_detected',
                     'signal': signal,
@@ -593,42 +689,41 @@ MIN_CANDLES = {
 
 @app.route('/signals', methods=['GET'])
 def get_signals():
-    """Get latest signals for all tracked symbols."""
+    """Get latest signal status for all tracked symbols.
+    
+    READ-ONLY: Does NOT call strategy.analyze() to avoid side effects.
+    Analysis only runs from webhook POST when new candle data arrives.
+    """
     signals = {}
-    for symbol, data in market_data.items():
-        try:
-            data_4h = data.get('4H', {})
-            data_1h = data.get('1H', {})
-            data_15m = data.get('15M', {})
-            data_5m = data.get('5M', {})
-            
-            if (len(data_4h.get('close', [])) >= MIN_CANDLES['4H'] and
-                len(data_1h.get('close', [])) >= MIN_CANDLES['1H'] and
-                len(data_15m.get('close', [])) >= MIN_CANDLES['15M'] and
-                len(data_5m.get('close', [])) >= MIN_CANDLES['5M']):
-                
-                # Convert ALL timeframes for MTF analysis
-                mtf_data = {
-                    '4H': convert_to_candles_list(data_4h),
-                    '1H': convert_to_candles_list(data_1h),
-                    '15M': convert_to_candles_list(data_15m),
-                    '5M': convert_to_candles_list(data_5m)
-                }
-                
-                signal = strategy.analyze(mtf_data['5M'], symbol=symbol, mtf_data=mtf_data)
-                
-                if signal:
-                    # Normalize keys for frontend
-                    signal['type'] = signal.get('direction', 'UNKNOWN')
-                    signal['entry'] = signal.get('entry_price', 0)
-                    signals[symbol] = signal
-                else:
-                    signals[symbol] = {'status': 'no_setup'}
-            else:
-                signals[symbol] = {'status': 'insufficient_data'}
-        except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"Error analyzing {symbol}: {e}")
-            signals[symbol] = {'status': 'error', 'message': str(e)}
+    
+    # Get pending signals from active_signals (already analyzed)
+    pending = get_pending_signals()
+    for sig in pending:
+        sym = sig.get('symbol', '')
+        signals[sym] = {
+            'status': 'pending',
+            'signal_id': sig.get('id'),
+            'direction': sig.get('direction', sig.get('type', 'UNKNOWN')),
+            'type': sig.get('direction', sig.get('type', 'UNKNOWN')),
+            'entry': sig.get('entry', sig.get('entry_price', 0)),
+            'entry_price': sig.get('entry', sig.get('entry_price', 0)),
+            'stop_loss': sig.get('stop_loss', 0),
+            'take_profit': sig.get('take_profit', 0),
+            'setup_type': sig.get('setup_type', ''),
+            'confidence': sig.get('confidence', 0),
+            'risk_reward': sig.get('risk_reward', 0),
+            'confirmations': sig.get('confirmations', []),
+            'detected_at': sig.get('detected_at', ''),
+        }
+    
+    # For symbols with no pending signal, show "no_setup" status
+    for symbol in market_data:
+        if symbol not in signals:
+            has_data = all(
+                len(market_data[symbol].get(tf, {}).get('close', [])) >= MIN_CANDLES.get(tf, 50)
+                for tf in ['4H', '1H', '15M', '5M']
+            )
+            signals[symbol] = {'status': 'no_setup' if has_data else 'insufficient_data'}
     
     return jsonify({
         'status': 'success',
@@ -664,6 +759,15 @@ def cancel_signal_endpoint(signal_id):
     if cancel_signal(signal_id):
         return jsonify({'status': 'success', 'message': f'Signal {signal_id} cancelled'})
     return jsonify({'status': 'error', 'message': 'Signal not found'}), 404
+
+
+@app.route('/signals/stats', methods=['GET'])
+def get_signal_stats_endpoint():
+    """Get signal statistics from database."""
+    if DB_AVAILABLE and trades_db:
+        stats = trades_db.get_signal_stats()
+        return jsonify({'status': 'success', 'stats': stats})
+    return jsonify({'status': 'error', 'message': 'Database not available'}), 500
 
 
 @app.route('/report/daily', methods=['GET', 'POST'])

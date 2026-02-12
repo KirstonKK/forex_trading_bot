@@ -345,3 +345,73 @@ class TradesDatabase:
         except Exception as e:
             print(f"Error getting today's signals count: {e}")
             return 0
+
+    def update_signal_status(self, symbol: str, entry_price: float, 
+                             executed: bool, trade_id: str = None,
+                             result: str = None) -> bool:
+        """
+        Update a signal's execution status.
+        Matches on symbol + entry_price (within tolerance) for the most recent signal.
+        
+        Args:
+            symbol: Trading pair
+            entry_price: Entry price to match
+            executed: Whether the signal was executed
+            trade_id: Optional trade ID if executed
+            result: Optional result ('win', 'loss', 'breakeven', 'cancelled')
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Find the most recent matching signal
+            cursor.execute("""
+                UPDATE signals 
+                SET executed = ?, trade_id = ?
+                WHERE id = (
+                    SELECT id FROM signals 
+                    WHERE symbol = ? 
+                    AND ABS(entry_price - ?) < 0.001
+                    ORDER BY id DESC LIMIT 1
+                )
+            """, (1 if executed else 0, trade_id, symbol, entry_price))
+            
+            updated = cursor.rowcount
+            conn.commit()
+            conn.close()
+            
+            if updated:
+                print(f"Signal status updated: {symbol} @ {entry_price} -> executed={executed}")
+            return updated > 0
+        except Exception as e:
+            print(f"Error updating signal status: {e}")
+            return False
+
+    def get_signal_stats(self) -> Dict:
+        """Get signal statistics summary."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM signals")
+            total = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM signals WHERE executed = 1")
+            executed = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM signals WHERE executed = 0")
+            not_executed = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM signals WHERE DATE(timestamp) = DATE('now')")
+            today = cursor.fetchone()[0]
+            
+            conn.close()
+            return {
+                'total_signals': total,
+                'executed': executed,
+                'not_executed': not_executed,
+                'today': today
+            }
+        except Exception as e:
+            print(f"Error getting signal stats: {e}")
+            return {}

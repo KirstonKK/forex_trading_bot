@@ -115,24 +115,20 @@ class NewsFilter:
     
     def _fetch_manual_schedule(self) -> List[Dict]:
         """
-        Define major scheduled events manually
-        These are the key events that move markets
+        Define major scheduled events manually.
+        Only block trading for CONFIRMED high-impact events,
+        not every Thursday/Wednesday "just in case".
+        
+        FOMC meets ~8 times/year, ECB ~8 times, BOE ~8 times.
+        These DON'T happen every week, so marking them HIGH every
+        Thursday/Wednesday was blocking trades unnecessarily.
         """
-        # Weekly recurring events (approximate times UTC)
         now = datetime.utcnow()
         events = []
         
-        # NFP - First Friday of month at 13:30 UTC
-        # FOMC - Usually Wed at 19:00 UTC (8 meetings per year)
-        # ECB Rate Decision - Usually Thursday at 12:45 UTC
-        # BOE Rate Decision - Usually Thursday at 12:00 UTC
-        
-        # For now, define key times to avoid
-        # These are approximate and should be updated with live data
-        
         weekday = now.weekday()  # 0=Monday, 4=Friday
         
-        # Check if first Friday of month (NFP day)
+        # NFP - First Friday of month at 13:30 UTC (very predictable)
         if weekday == 4 and now.day <= 7:
             events.append({
                 'time': now.replace(hour=13, minute=30, second=0),
@@ -141,31 +137,35 @@ class NewsFilter:
                 'impact': 'HIGH'
             })
         
-        # FOMC Wednesdays (roughly every 6 weeks)
+        # Mark recurring events as MEDIUM so they don't block trading.
+        # Without a real calendar API, we can't know which specific
+        # Thursday/Wednesday actually has a central bank decision.
+        
+        # FOMC Wednesdays (roughly every 6 weeks — NOT every week)
         if weekday == 2:
             events.append({
                 'time': now.replace(hour=19, minute=0, second=0),
                 'name': 'FOMC Meeting (possible)',
                 'currency': 'USD',
-                'impact': 'HIGH'
+                'impact': 'MEDIUM'
             })
         
-        # ECB Thursdays
+        # ECB Thursdays (roughly every 6 weeks — NOT every week)
         if weekday == 3:
             events.append({
                 'time': now.replace(hour=12, minute=45, second=0),
                 'name': 'ECB Rate Decision (possible)',
                 'currency': 'EUR',
-                'impact': 'HIGH'
+                'impact': 'MEDIUM'
             })
         
-        # BOE Thursdays
+        # BOE Thursdays (roughly every 6 weeks — NOT every week)
         if weekday == 3:
             events.append({
                 'time': now.replace(hour=12, minute=0, second=0),
                 'name': 'BOE Rate Decision (possible)',
                 'currency': 'GBP',
-                'impact': 'HIGH'
+                'impact': 'MEDIUM'
             })
         
         # Daily CPI/PPI releases (typically 13:30 UTC for US)

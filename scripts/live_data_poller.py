@@ -1,6 +1,7 @@
 """
-Live Data Poller - Fetches real-time forex data and sends to webhook server
-Uses free data sources (Alpha Vantage or direct polling) to simulate TradingView webhooks
+Live Data Poller - FALLBACK ONLY
+Primary: TradingView webhooks (real exchange data)
+Fallback: yfinance polling (only if TradingView data is stale)
 """
 
 import sys
@@ -31,9 +32,14 @@ logger = logging.getLogger(__name__)
 # Server configuration
 WEBHOOK_URL = "http://localhost:5000/webhook"
 WEBHOOK_SECRET = "your_secret_key_here"
+HEALTH_URL = "http://localhost:5000/health"
+DATA_URL = "http://localhost:5000/data"
 
 # Currency pairs to track
 PAIRS = ['EURUSD', 'GBPUSD', 'XAUUSD']
+
+# Data freshness threshold (seconds)
+STALE_DATA_THRESHOLD = 300  # 5 minutes
 
 
 def is_forex_market_open():
@@ -102,52 +108,8 @@ def wait_for_market_open():
     
     return True
 
-# Use yfinance for real-time forex futures data
+# Use yfinance for real OHLCV data (no more single-tick fake candles)
 import yfinance as yf
-
-def fetch_current_price(base_currency='EUR', quote_currency='USD'):
-    """Fetch real-time forex price from yfinance futures."""
-    # Map to futures contracts for real-time data
-    pair = f"{base_currency}{quote_currency}"
-    symbol_map = {
-        'EURUSD': '6E=F',   # Euro futures
-        'GBPUSD': '6B=F',   # British Pound futures
-        'USDJPY': '6J=F',   # Yen futures
-        'AUDUSD': '6A=F',   # AUD futures
-        'XAUUSD': 'GC=F',   # Gold futures
-    }
-    
-    ticker_symbol = symbol_map.get(pair)
-    if not ticker_symbol:
-        return None
-    
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        # Get latest data
-        hist = ticker.history(period='1d', interval='1m')
-        if not hist.empty:
-            price = float(hist['Close'].iloc[-1])
-            return price
-        return None
-        
-    except Exception as e:
-        logger.error(f"Error fetching {pair}: {e}")
-        return None
-
-
-def generate_candle_from_price(price):
-    """Generate a synthetic candle from current price."""
-    # Add small variations to simulate OHLC
-    variation = price * 0.0002  # 0.02% variation
-    
-    return {
-        'time': int(datetime.now().timestamp()),
-        'open': round(price - variation * 0.5, 5),
-        'high': round(price + variation, 5),
-        'low': round(price - variation, 5),
-        'close': round(price, 5),
-        'volume': 1000
-    }
 
 
 def send_candle_to_webhook(symbol_name, candle, timeframe):
@@ -191,13 +153,12 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
         }
         
         ticker_symbol = symbol_map.get(symbol, symbol)
-        logger.info(f"  Fetching {interval} data for {ticker_symbol}...")
         
         ticker = yf.Ticker(ticker_symbol)
         df = ticker.history(period=period, interval=interval)
         
         if df.empty:
-            logger.warning(f"  No data returned for {ticker_symbol}")
+            logger.warning(f"  No data returned for {ticker_symbol} ({interval})")
             return []
         
         # Convert to list of candles
@@ -212,7 +173,6 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
                 'volume': int(row['Volume']) if pd.notna(row['Volume']) else 1000
             })
         
-        logger.info(f"  ✓ Fetched {len(candles)} real {interval} candles")
         return candles
         
     except Exception as e:
@@ -281,12 +241,19 @@ def initial_data_load():
 
 
 def poll_live_data():
-    """Poll for new prices and send to webhook - ALL TIMEFRAMES."""
-    logger.info("Starting live polling with MULTI-TIMEFRAME updates...")
+    """Poll for real OHLCV candles across ALL timeframes from yfinance."""
+    logger.info("Starting live polling with REAL CANDLE DATA on all timeframes...")
     
+    last_5m_update = {}
     last_15m_update = {}
     last_1h_update = {}
     last_4h_update = {}
+    
+    # Track last candle timestamps to detect new candles
+    last_5m_candle_time = {}
+    last_15m_candle_time = {}
+    last_1h_candle_time = {}
+    last_4h_candle_time = {}
     
     while True:
         try:
@@ -295,72 +262,97 @@ def poll_live_data():
             if not is_open:
                 wait_for_market_open()
                 # Reset update timers after weekend
+                last_5m_update = {}
                 last_15m_update = {}
                 last_1h_update = {}
                 last_4h_update = {}
+                last_5m_candle_time = {}
+                last_15m_candle_time = {}
+                last_1h_candle_time = {}
+                last_4h_candle_time = {}
                 continue
             
             for pair in PAIRS:
-                # Parse currency pair
-                base = pair[:3]
-                quote = pair[3:6]
+                now = time.time()
                 
-                # Fetch current price from yfinance (real-time)
-                price = fetch_current_price(base, quote)
+                # ===== REAL 5M candles every 30 seconds =====
+                # (5M candles close every 5 min, polling every 30s catches them promptly)
+                if pair not in last_5m_update or (now - last_5m_update[pair]) > 30:
+                    candles_5m = fetch_real_historical_data(pair, interval='5m', period='5d')
+                    if candles_5m:
+                        # Only send candles newer than what we last sent
+                        prev_time = last_5m_candle_time.get(pair, 0)
+                        new_candles = [c for c in candles_5m if c['time'] > prev_time]
+                        
+                        if new_candles:
+                            # Send the latest real candles (last 3 new ones max to avoid spam)
+                            for c in new_candles[-3:]:
+                                send_candle_to_webhook(pair, c, '5M')
+                            last_5m_candle_time[pair] = candles_5m[-1]['time']
+                            logger.info(f"Current {pair}: {candles_5m[-1]['close']:.5f} (5M real candle)")
+                        else:
+                            # No new candle yet, just log current price
+                            logger.info(f"Current {pair}: {candles_5m[-1]['close']:.5f}")
+                        
+                        last_5m_update[pair] = now
+                    else:
+                        logger.warning(f"Could not fetch 5M data for {pair}")
                 
-                if price:
-                    logger.info(f"Current {pair}: {price:.5f}")
-                    
-                    # Always send 5M candle (every poll)
-                    candle = generate_candle_from_price(price)
-                    send_candle_to_webhook(pair, candle, '5M')
-                    
-                    now = time.time()
-                    
-                    # Fetch fresh 15M data every 2 minutes
-                    if pair not in last_15m_update or (now - last_15m_update[pair]) > 120:
-                        candles_15m = fetch_real_historical_data(pair, interval='15m', period='5d')
-                        if candles_15m:
-                            for c in candles_15m[-3:]:
+                # ===== REAL 15M candles every 2 minutes =====
+                if pair not in last_15m_update or (now - last_15m_update[pair]) > 120:
+                    candles_15m = fetch_real_historical_data(pair, interval='15m', period='5d')
+                    if candles_15m:
+                        prev_time = last_15m_candle_time.get(pair, 0)
+                        new_candles = [c for c in candles_15m if c['time'] > prev_time]
+                        if new_candles:
+                            for c in new_candles[-3:]:
                                 send_candle_to_webhook(pair, c, '15M')
-                            last_15m_update[pair] = now
-                            logger.info(f"  📊 Updated 15M data for {pair}")
-                    
-                    # Fetch fresh 1H data every 5 minutes
-                    if pair not in last_1h_update or (now - last_1h_update[pair]) > 300:
-                        candles_1h = fetch_real_historical_data(pair, interval='1h', period='5d')
-                        if candles_1h:
-                            for c in candles_1h[-3:]:
+                            last_15m_candle_time[pair] = candles_15m[-1]['time']
+                            logger.info(f"  📊 Updated 15M data for {pair} ({len(new_candles)} new candles)")
+                        last_15m_update[pair] = now
+                
+                # ===== REAL 1H candles every 5 minutes =====
+                if pair not in last_1h_update or (now - last_1h_update[pair]) > 300:
+                    candles_1h = fetch_real_historical_data(pair, interval='1h', period='5d')
+                    if candles_1h:
+                        prev_time = last_1h_candle_time.get(pair, 0)
+                        new_candles = [c for c in candles_1h if c['time'] > prev_time]
+                        if new_candles:
+                            for c in new_candles[-3:]:
                                 send_candle_to_webhook(pair, c, '1H')
-                            last_1h_update[pair] = now
-                            logger.info(f"  📊 Updated 1H data for {pair}")
-                    
-                    # Fetch fresh 4H data every 20 minutes
-                    if pair not in last_4h_update or (now - last_4h_update[pair]) > 1200:
-                        candles_1h_for_4h = fetch_real_historical_data(pair, interval='1h', period='1mo')
-                        if candles_1h_for_4h:
-                            # Aggregate to 4H
-                            candles_4h = []
-                            for i in range(0, len(candles_1h_for_4h), 4):
-                                chunk = candles_1h_for_4h[i:i+4]
-                                if len(chunk) == 4:
-                                    candles_4h.append({
-                                        'time': chunk[0]['time'],
-                                        'open': chunk[0]['open'],
-                                        'high': max(c['high'] for c in chunk),
-                                        'low': min(c['low'] for c in chunk),
-                                        'close': chunk[-1]['close'],
-                                        'volume': sum(c['volume'] for c in chunk)
-                                    })
-                            for c in candles_4h[-3:]:
-                                send_candle_to_webhook(pair, c, '4H')
-                            last_4h_update[pair] = now
-                            logger.info(f"  📊 Updated 4H data for {pair}")
-                else:
-                    logger.warning(f"Could not fetch price for {pair}")
+                            last_1h_candle_time[pair] = candles_1h[-1]['time']
+                            logger.info(f"  📊 Updated 1H data for {pair} ({len(new_candles)} new candles)")
+                        last_1h_update[pair] = now
+                
+                # ===== REAL 4H candles every 20 minutes =====
+                if pair not in last_4h_update or (now - last_4h_update[pair]) > 1200:
+                    candles_1h_for_4h = fetch_real_historical_data(pair, interval='1h', period='1mo')
+                    if candles_1h_for_4h:
+                        # Aggregate to 4H
+                        candles_4h = []
+                        for i in range(0, len(candles_1h_for_4h), 4):
+                            chunk = candles_1h_for_4h[i:i+4]
+                            if len(chunk) == 4:
+                                candles_4h.append({
+                                    'time': chunk[0]['time'],
+                                    'open': chunk[0]['open'],
+                                    'high': max(c['high'] for c in chunk),
+                                    'low': min(c['low'] for c in chunk),
+                                    'close': chunk[-1]['close'],
+                                    'volume': sum(c['volume'] for c in chunk)
+                                })
+                        if candles_4h:
+                            prev_time = last_4h_candle_time.get(pair, 0)
+                            new_candles = [c for c in candles_4h if c['time'] > prev_time]
+                            if new_candles:
+                                for c in new_candles[-3:]:
+                                    send_candle_to_webhook(pair, c, '4H')
+                                last_4h_candle_time[pair] = candles_4h[-1]['time']
+                                logger.info(f"  📊 Updated 4H data for {pair} ({len(new_candles)} new candles)")
+                        last_4h_update[pair] = now
             
-            # Wait 5 seconds before next poll (faster updates)
-            time.sleep(5)
+            # Wait 30 seconds between polls (aligned with 5M candle detection)
+            time.sleep(30)
             
         except KeyboardInterrupt:
             logger.info("Stopping poller...")
@@ -373,12 +365,36 @@ def poll_live_data():
             time.sleep(30)
 
 
+def check_tradingview_data():
+    """Check if TradingView is sending recent data."""
+    try:
+        response = requests.get(DATA_URL, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('symbols'):
+                # Check if any data is recent (within last 5 minutes)
+                now = time.time()
+                for symbol_data in data['symbols'].values():
+                    if symbol_data.get('candles'):
+                        for tf_candles in symbol_data['candles'].values():
+                            if tf_candles:
+                                latest = max(c.get('timestamp', 0) for c in tf_candles)
+                                age = now - latest
+                                if age < STALE_DATA_THRESHOLD:
+                                    return True, age
+                return False, None
+    except:
+        pass
+    return False, None
+
+
 if __name__ == '__main__':
     print("\n" + "="*70)
-    print("LIVE FOREX DATA POLLER")
+    print("LIVE FOREX DATA POLLER - FALLBACK MODE")
     print("="*70)
-    print("Fetching real-time forex rates from yfinance")
-    print(f"Sending to: {WEBHOOK_URL}")
+    print("PRIMARY: TradingView webhooks (real exchange data)")
+    print("FALLBACK: yfinance polling (if TradingView data is stale)")
+    print(f"Webhook URL: {WEBHOOK_URL}")
     print(f"Tracking: {', '.join(PAIRS)}")
     
     # Show market status
@@ -393,7 +409,7 @@ if __name__ == '__main__':
     
     # Check if server is running
     try:
-        response = requests.get("http://localhost:5000/health", timeout=5)
+        response = requests.get(HEALTH_URL, timeout=5)
         if response.status_code == 200:
             logger.info("✓ Webhook server is running")
         else:
@@ -404,8 +420,29 @@ if __name__ == '__main__':
         logger.error("Start it with: python3 scripts/tradingview_webhook_server.py")
         sys.exit(1)
     
+    # Check if TradingView is already providing data
+    has_tv_data, data_age = check_tradingview_data()
+    if has_tv_data:
+        logger.info(f"✅ TradingView is ACTIVE (data is {data_age:.0f}s old)")
+        logger.info("📺 Poller will run in MONITORING mode only")
+        logger.info("💡 TradingView webhooks are primary data source")
+        # Still poll but at much slower rate to fill gaps
+        while True:
+            time.sleep(60)  # Check every minute
+            has_tv, age = check_tradingview_data()
+            if not has_tv or age > STALE_DATA_THRESHOLD:
+                logger.warning("⚠️ TradingView data is stale, activating fallback polling...")
+                break
+    else:
+        logger.warning("⚠️ No recent TradingView data found")
+        logger.info("🔄 Activating yfinance fallback polling...")
+    
     # Load initial historical data
-    initial_data_load()
+    try:
+        initial_data_load()
+    except Exception as e:
+        logger.error(f"❌ Failed to load initial data: {e}")
+        logger.info("Continuing with live polling only...")
     
     # Start live polling
     poll_live_data()

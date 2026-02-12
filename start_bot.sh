@@ -13,7 +13,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Bot directory
-BOT_DIR="/home/juujuaddy/forex_trading_bot"
+BOT_DIR="/home/vanhansen53/forex_trading_bot"
 cd "$BOT_DIR"
 
 echo ""

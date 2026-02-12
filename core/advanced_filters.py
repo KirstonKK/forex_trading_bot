@@ -450,9 +450,9 @@ class AdvancedFilters:
         recent = candles[-10:]  # Look at more candles for sweep confirmation
         current_price = current['close']
         
-        # Calculate buffer (10 pips) for clean sweep confirmation
+        # Calculate buffer (3 pips) for sweep confirmation
         pip_value = 0.0001
-        buffer = 10 * pip_value  # 10 pips buffer
+        buffer = 3 * pip_value  # 3 pips buffer (EU often sweeps by 3-8 pips)
         
         # Check if swept high (bearish signal)
         # MUST have price trade ABOVE asian high, then close BACK BELOW
@@ -523,41 +523,35 @@ class AdvancedFilters:
     def can_trade_now(self, timestamp: int) -> Tuple[bool, str]:
         """
         Comprehensive check: Can we trade now?
-        - Not during news
-        - Not during low-liquidity periods
-        - Only during OPTIMAL trading sessions (London, Overlap, Early NY)
-        - Avoid early London (false breakouts) and Fridays
+        - Not during high-impact news
+        - Not on weekends (market closed)
         
-        Trading Sessions (UTC):
-        - Late London: 10:00 - 12:00 (avoid early London fakeouts)
-        - London/NY Overlap: 12:00 - 16:00 (best volatility - ICT sweet spot)
-        - NY AM: 16:00 - 17:00 (ICT NY killzone - shortened)
-        
-        For higher win rate, we focus on these high-probability windows.
+        Forex is open 24/5 — Sunday 5pm EST to Friday 5pm EST.
+        Setups can form at any hour (Asian sweeps, London, NY).
+        We only block weekends and major news events.
         
         Returns:
             (can_trade, reason_if_not)
         """
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         
-        # Check news
+        # Check news (this already handles NFP on first Friday)
         is_news, news_reason = self.is_news_time(timestamp)
         if is_news:
             return False, f"News event: {news_reason}"
         
-        # Avoid Friday completely - end of week choppiness
-        if dt.weekday() == 4:
-            return False, "Friday - avoid end of week"
-        
-        # Check day of week
-        if dt.weekday() == 6:  # Sunday
-            return False, "Sunday - market opening"
-        
-        # ICT KILLZONES ONLY - avoid early London (8-10) which has more fakeouts
-        # Best hours: 10:00-17:00 UTC (late London + Overlap + early NY)
+        # Block weekends only (forex closed Sat + Sun before 5pm EST / 22:00 UTC)
+        weekday = dt.weekday()
         hour = dt.hour
-        if not (10 <= hour < 17):
-            return False, "Outside optimal ICT hours"
+        
+        if weekday == 5:  # Saturday - fully closed
+            return False, "Weekend - market closed"
+        
+        if weekday == 6 and hour < 22:  # Sunday before ~5pm EST
+            return False, "Sunday - market not yet open"
+        
+        if weekday == 4 and hour >= 22:  # Friday after ~5pm EST
+            return False, "Friday close - market closing"
         
         return True, ''
     

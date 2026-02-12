@@ -13,6 +13,8 @@ Risk Management:
 - 1 confirmation = no trade
 """
 
+import os
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 from enum import Enum
@@ -37,6 +39,7 @@ class SetupType(Enum):
     OPTION_1 = "HTF_LIQUIDITY_BOS"  # HTF Bias + Liquidity + BoS
     OPTION_2 = "HTF_ZONE_OB_CHOCH"  # HTF Zone + OB + ChoCH
     OPTION_3 = "OB_FVG_FIB"         # OB + FVG + Fib 79%
+    OPTION_4 = "LIQ_SWEEP_ENGULF"   # Liquidity Sweep + Engulfing (price action)
 
 
 @dataclass
@@ -102,6 +105,9 @@ class FlexibleSignal:
 class FlexibleICTStrategy:
     """Flexible ICT strategy with 3 setup options."""
     
+    # Persistent state file — survives restarts
+    _STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data', 'signal_state.json')
+    
     def __init__(self):
         self.filters = AdvancedFilters()
         self.trades_today = {}  # Track per symbol: {'EURUSD': 1, 'GBPUSD': 0}
@@ -118,16 +124,61 @@ class FlexibleICTStrategy:
         
         # Signal cooldown - prevent duplicate/similar signals
         self._last_signal_time = {}  # {'EURUSD': timestamp}
-        self._signal_cooldown_minutes = 30  # 30 min minimum between signals on same pair
+        self._signal_cooldown_minutes = 240  # 4 hours between signals on same pair (was 30min = spam)
+        
+        # Load persisted state from disk (survives restarts)
+        self._load_state()
         
         # Session-specific settings
         self.session_settings = {
-            'london': {'start': 8, 'end': 12, 'min_confidence': 0.85},
-            'newyork': {'start': 13, 'end': 17, 'min_confidence': 0.90}
+            'asian': {'start': 0, 'end': 8, 'min_confidence': 0.80},
+            'london': {'start': 8, 'end': 12, 'min_confidence': 0.80},
+            'newyork': {'start': 13, 'end': 17, 'min_confidence': 0.80}
         }
         
         # Fixed R:R - DO NOT CHANGE (60% win rate achieved with 1:2)
         self.target_rr = 2.0  # 1:2 R:R - backtested
+    
+    def _load_state(self):
+        """Load signal cooldown and trade state from disk (survives restarts)."""
+        try:
+            if os.path.exists(self._STATE_FILE):
+                with open(self._STATE_FILE, 'r') as f:
+                    state = json.load(f)
+                # Restore cooldown times
+                self._last_signal_time = state.get('last_signal_time', {})
+                # Restore today's trades (check date)
+                saved_date = state.get('current_date')
+                today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                if saved_date == today:
+                    self.trades_today = state.get('trades_today', {})
+                    self.current_date = datetime.now(timezone.utc).date()
+                # Restore recent signal directions
+                self._recent_signals = state.get('recent_signals', {})
+                import logging
+                logging.getLogger('strategy').info(
+                    f"📂 Loaded signal state: cooldowns={list(self._last_signal_time.keys())}, "
+                    f"trades_today={self.trades_today}"
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger('strategy').warning(f"Could not load signal state: {e}")
+    
+    def _save_state(self):
+        """Persist signal cooldown and trade state to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._STATE_FILE), exist_ok=True)
+            state = {
+                'last_signal_time': self._last_signal_time,
+                'trades_today': self.trades_today,
+                'current_date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+                'recent_signals': self._recent_signals
+            }
+            with open(self._STATE_FILE, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            import logging
+            logging.getLogger('strategy').warning(f"Could not save signal state: {e}")
     
     def get_pip_value(self, symbol: str = None) -> float:
         """
@@ -267,11 +318,13 @@ class FlexibleICTStrategy:
     def get_session_type(self, timestamp: int) -> str:
         """Determine current trading session."""
         hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
-        if 8 <= hour < 12:
+        if 0 <= hour < 8:
+            return 'asian'
+        elif 8 <= hour < 12:
             return 'london'
         elif 13 <= hour < 17:
             return 'newyork'
-        return 'other'
+        return 'london'  # Default to london confidence for overlap/late NY
     
     def check_15m_confirmation(self, direction: str) -> bool:
         """
@@ -310,16 +363,16 @@ class FlexibleICTStrategy:
         
         # Count higher highs/higher lows vs lower highs/lower lows
         hh_count = sum(1 for i in range(5, len(highs)) if highs[i] > max(highs[i-5:i]))
-        hl_count = sum(1 for i in range(5, len(lows)) if lows[i] > max(lows[i-5:i]))
+        hl_count = sum(1 for i in range(5, len(lows)) if lows[i] > min(lows[i-5:i]))
         lh_count = sum(1 for i in range(5, len(highs)) if highs[i] < min(highs[i-5:i]))
-        ll_count = sum(1 for i in range(5, len(lows)) if lows[i] < min(lows[i-5:i]))
+        ll_count = sum(1 for i in range(5, len(lows)) if lows[i] < max(lows[i-5:i]))
         
         bullish_score = hh_count + hl_count
         bearish_score = lh_count + ll_count
         
-        if bullish_score > bearish_score * 1.3:
+        if bullish_score > bearish_score * 1.15:
             return TrendDirection.BULLISH
-        elif bearish_score > bullish_score * 1.3:
+        elif bearish_score > bullish_score * 1.15:
             return TrendDirection.BEARISH
         return TrendDirection.RANGING
     
@@ -962,6 +1015,249 @@ class FlexibleICTStrategy:
             'has_fib_confluence': True
         }
     
+    def detect_engulfing(self, candles: List[dict], timeframe: int = 15) -> Optional[dict]:
+        """
+        Detect engulfing candles on specified timeframe.
+        
+        Bullish Engulfing: bearish candle followed by bullish candle that
+        opens at/below previous close and closes at/above previous open.
+        
+        Bearish Engulfing: bullish candle followed by bearish candle that
+        opens at/above previous close and closes at/below previous open.
+        
+        Returns dict with 'direction', 'candle', 'prev_candle' or None.
+        """
+        # Use actual MTF data if available
+        if self.mtf_data:
+            tf_candles = self.get_htf_candles(timeframe)
+        else:
+            tf_candles = self.filters.get_timeframe_data(candles, timeframe)
+        
+        if len(tf_candles) < 3:
+            return None
+        
+        pip_value = self.get_pip_value()
+        min_body = 3 * pip_value  # Engulfing body must be at least 3 pips
+        
+        # Check last 3 candles for engulfing patterns
+        for i in range(len(tf_candles) - 1, max(len(tf_candles) - 4, 0), -1):
+            curr = tf_candles[i]
+            prev = tf_candles[i - 1]
+            
+            curr_body = curr['close'] - curr['open']
+            prev_body = prev['close'] - prev['open']
+            
+            # Bullish Engulfing: prev bearish, current bullish and engulfs
+            if (prev_body < 0 and curr_body > 0 and
+                abs(curr_body) >= min_body and
+                curr['open'] <= prev['close'] and
+                curr['close'] >= prev['open']):
+                return {
+                    'direction': 'long',
+                    'candle': curr,
+                    'prev_candle': prev,
+                    'timeframe': timeframe,
+                    'body_size': abs(curr_body)
+                }
+            
+            # Bearish Engulfing: prev bullish, current bearish and engulfs
+            if (prev_body > 0 and curr_body < 0 and
+                abs(curr_body) >= min_body and
+                curr['open'] >= prev['close'] and
+                curr['close'] <= prev['open']):
+                return {
+                    'direction': 'short',
+                    'candle': curr,
+                    'prev_candle': prev,
+                    'timeframe': timeframe,
+                    'body_size': abs(curr_body)
+                }
+        
+        return None
+    
+    def find_5m_liquidity_zone(self, candles: List[dict], lookback: int = 60) -> Optional[dict]:
+        """
+        Find a liquidity zone on 5M: cluster of equal lows/highs that got swept.
+        
+        A liquidity zone is where price built up equal lows/highs (resting orders)
+        and then swept through them.
+        
+        Returns dict with 'level', 'type' ('low'/'high'), 'swept', 'sweep_candle'.
+        """
+        if len(candles) < 20:
+            return None
+        
+        pip_value = self.get_pip_value()
+        eq_tolerance = 3 * pip_value  # 3 pips for equal levels
+        
+        recent = candles[-lookback:] if len(candles) >= lookback else candles
+        lows = [c['low'] for c in recent]
+        highs = [c['high'] for c in recent]
+        
+        # Find clusters of equal lows (liquidity pool below)
+        low_clusters = []
+        for i in range(len(lows) - 5):
+            matches = [i]
+            for j in range(i + 1, len(lows)):
+                if abs(lows[j] - lows[i]) < eq_tolerance:
+                    matches.append(j)
+            if len(matches) >= 2:
+                avg_level = sum(lows[m] for m in matches) / len(matches)
+                low_clusters.append({'level': avg_level, 'count': len(matches), 'type': 'low'})
+        
+        # Find clusters of equal highs (liquidity pool above)
+        high_clusters = []
+        for i in range(len(highs) - 5):
+            matches = [i]
+            for j in range(i + 1, len(highs)):
+                if abs(highs[j] - highs[i]) < eq_tolerance:
+                    matches.append(j)
+            if len(matches) >= 2:
+                avg_level = sum(highs[m] for m in matches) / len(matches)
+                high_clusters.append({'level': avg_level, 'count': len(matches), 'type': 'high'})
+        
+        # Check if any cluster was swept in the last 10 candles
+        last_candles = candles[-10:]
+        
+        # Check low sweeps (for long setups)
+        for cluster in sorted(low_clusters, key=lambda x: x['count'], reverse=True):
+            for c in last_candles:
+                if c['low'] < cluster['level'] - eq_tolerance:
+                    # Low was swept and price is back above
+                    if candles[-1]['close'] > cluster['level']:
+                        cluster['swept'] = True
+                        cluster['sweep_low'] = c['low']
+                        return cluster
+        
+        # Check high sweeps (for short setups)
+        for cluster in sorted(high_clusters, key=lambda x: x['count'], reverse=True):
+            for c in last_candles:
+                if c['high'] > cluster['level'] + eq_tolerance:
+                    if candles[-1]['close'] < cluster['level']:
+                        cluster['swept'] = True
+                        cluster['sweep_high'] = c['high']
+                        return cluster
+        
+        return None
+    
+    def try_option_4(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+        """
+        Option 4: Liquidity Sweep + Engulfing Confirmation
+        
+        Simple but effective price action setup:
+        1. Price sweeps a liquidity zone on 5M (equal lows/highs or session lows/highs)
+        2. 15M engulfing candle confirms reversal
+        3. Enter on the close of the engulfing candle
+        
+        SL: Below/above the swept liquidity level
+        TP: 2x risk (1:2 R:R)
+        
+        This catches setups like:
+        - Asian session low sweep → London bullish engulfing → Buy
+        - Previous session high sweep → bearish engulfing → Sell
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        confirmations = []
+        
+        # 1. Check for engulfing candle on 15M (the trigger)
+        engulfing = self.detect_engulfing(candles, timeframe=15)
+        if not engulfing:
+            self._last_rejection_reasons.append("Opt4: No engulfing candle on 15M")
+            return None
+        
+        direction = engulfing['direction']
+        confirmations.append("15M_ENGULFING")
+        
+        # 2. Check for liquidity sweep on 5M
+        # First try: check if Asian range or session lows/highs were swept
+        has_sweep, sweep_type = self.check_liquidity_sweep(candles, symbol)
+        
+        if has_sweep:
+            # Verify sweep direction matches engulfing
+            if direction == 'long' and sweep_type == 'low':
+                confirmations.append("LIQUIDITY_SWEEP")
+                self._last_sweep_found = True
+            elif direction == 'short' and sweep_type == 'high':
+                confirmations.append("LIQUIDITY_SWEEP")
+                self._last_sweep_found = True
+            else:
+                has_sweep = False  # Direction mismatch
+        
+        # Second try: check for 5M liquidity zone sweep
+        if not has_sweep:
+            liq_zone = self.find_5m_liquidity_zone(candles)
+            if liq_zone and liq_zone.get('swept'):
+                if direction == 'long' and liq_zone['type'] == 'low':
+                    confirmations.append("5M_LIQ_ZONE_SWEEP")
+                    self._last_sweep_found = True
+                    has_sweep = True
+                elif direction == 'short' and liq_zone['type'] == 'high':
+                    confirmations.append("5M_LIQ_ZONE_SWEEP")
+                    self._last_sweep_found = True
+                    has_sweep = True
+        
+        # Third try: just check if price made a new low/high and reversed
+        if not has_sweep:
+            recent = candles[-20:]
+            if direction == 'long':
+                lowest = min(c['low'] for c in recent)
+                # Did recent candles sweep the low and recover?
+                last_3 = candles[-3:]
+                swept_and_recovered = any(c['low'] <= lowest * 1.0001 for c in last_3) and candles[-1]['close'] > lowest
+                if swept_and_recovered:
+                    confirmations.append("SWING_LOW_SWEEP")
+                    has_sweep = True
+            else:
+                highest = max(c['high'] for c in recent)
+                last_3 = candles[-3:]
+                swept_and_recovered = any(c['high'] >= highest * 0.9999 for c in last_3) and candles[-1]['close'] < highest
+                if swept_and_recovered:
+                    confirmations.append("SWING_HIGH_SWEEP")
+                    has_sweep = True
+        
+        if not has_sweep:
+            self._last_rejection_reasons.append("Opt4: Engulfing found but no liquidity sweep")
+            return None
+        
+        # 3. Optional bonus confirmations
+        # Check for OB at the sweep zone
+        order_blocks = self.find_order_blocks(candles, 5)
+        current_price = candles[-1]['close']
+        pip_value = self.get_pip_value()
+        tolerance = 15 * pip_value
+        
+        for ob in order_blocks:
+            expected_dir = 'bullish' if direction == 'long' else 'bearish'
+            if ob.direction == expected_dir:
+                if ob.low - tolerance <= current_price <= ob.high + tolerance:
+                    confirmations.append("OB_AT_SWEEP")
+                    break
+        
+        # Check HTF trend (bonus, not required)
+        htf_trend = self.determine_htf_trend(candles, 240)
+        if htf_trend == TrendDirection.BULLISH and direction == 'long':
+            confirmations.append("HTF_ALIGNED")
+        elif htf_trend == TrendDirection.BEARISH and direction == 'short':
+            confirmations.append("HTF_ALIGNED")
+        
+        _log.info(f"✅ [{symbol}] Option 4 HIT: {direction} - {confirmations}")
+        
+        return {
+            'setup_type': SetupType.OPTION_4,
+            'direction': direction,
+            'confirmations': confirmations,
+            'htf_trend': htf_trend if htf_trend != TrendDirection.RANGING else None,
+            'has_liquidity_sweep': True,
+            'has_bos': False,
+            'has_choch': False,
+            'has_fib_confluence': False,
+            'asian_sweep': 'LIQUIDITY_SWEEP' in confirmations,
+            'order_block': None,
+            'fvg': None,
+            'htf_zone': None
+        }
+    
     def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
         """
         Find the liquidity sweep level (swing high/low that was swept).
@@ -970,21 +1266,29 @@ class FlexibleICTStrategy:
         For SHORT: Find the recent swing high that was swept
         For LONG: Find the recent swing low that was swept
         
-        For HTF_LIQUIDITY_BOS setups: Use TIGHTER structure (last 10 candles) for 5-7 pip SL
-        For other setups: Use standard structure (last 20 candles)
+        For HTF_LIQUIDITY_BOS setups: Use tighter structure (last 15 candles)
+        For LIQ_SWEEP_ENGULF: Include ALL recent candles (the sweep IS the recent low/high)
+        For other setups: Look back 30 candles for significant structure
         """
         if len(candles) < 10:
             return None
         
-        # HTF_LIQUIDITY_BOS gets tighter SL (10 candles = ~50 min for 5M)
-        # This gives 5-7 pip SL for high-confidence setups
+        # Lookback periods — wider lookback finds more significant structure
         if setup_type == 'HTF_LIQUIDITY_BOS':
-            lookback = min(10, len(candles))
-        else:
-            # Standard setups use wider structure (20 candles = ~100 min)
+            lookback = min(15, len(candles))
+        elif setup_type == 'LIQ_SWEEP_ENGULF':
             lookback = min(20, len(candles))
+        else:
+            lookback = min(30, len(candles))  # OB_FVG_FIB, HTF_ZONE_OB_CHOCH: wider lookback
         
         recent = candles[-lookback:]
+        
+        if setup_type == 'LIQ_SWEEP_ENGULF':
+            # For sweep+engulfing: the swept level IS the most recent extreme
+            if direction == 'short':
+                return max(c['high'] for c in recent)
+            else:
+                return min(c['low'] for c in recent)
         
         if direction == 'short':
             # Find the highest swing high in recent candles (exclude last 3)
@@ -1043,8 +1347,25 @@ class FlexibleICTStrategy:
         else:
             stop_loss = sweep_level + buffer  # SL above the swept high
         
+        # === SANITY CHECK: SL must be on correct side of entry ===
+        # Long: SL must be BELOW entry | Short: SL must be ABOVE entry
+        if is_long and stop_loss >= entry:
+            # SL above entry for a long = invalid, use recent swing low instead
+            recent_low = min(c['low'] for c in candles[-20:])
+            stop_loss = recent_low - buffer
+        elif not is_long and stop_loss <= entry:
+            # SL below entry for a short = invalid, use recent swing high instead
+            recent_high = max(c['high'] for c in candles[-20:])
+            stop_loss = recent_high + buffer
+        
         sl_distance = abs(entry - stop_loss)
         sl_points = sl_distance / point_value
+        
+        # === ATR-based dynamic minimum SL ===
+        # SL must be at least 2x the average 5M candle range to avoid noise
+        recent_ranges = [c['high'] - c['low'] for c in candles[-20:]]
+        avg_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else 0
+        atr_min_sl = (avg_range * 2.0) / point_value  # 2x ATR in points
         
         # Max SL limits - different for Gold vs Forex
         # Gold at $5000 needs $15-50 SL (0.3%-1% of price) to avoid noise
@@ -1056,17 +1377,31 @@ class FlexibleICTStrategy:
                 max_sl_points = 5000   # $50 max for other setups
                 min_sl_points = 2000   # $20 min
         else:
-            # Forex: 5-25 pips SL range
+            # Forex: SL range depends on setup type
+            # Previous 5 pip minimums were within single candle noise!
             if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 70   # 7 pips max for HTF_LIQUIDITY_BOS
-                min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+                max_sl_points = 200  # 20 pips max for HTF_LIQUIDITY_BOS
+                min_sl_points = 80   # 8 pips min for HTF_LIQUIDITY_BOS
+            elif setup_type == 'LIQ_SWEEP_ENGULF':
+                max_sl_points = 250  # 25 pips max for sweep+engulfing
+                min_sl_points = 100  # 10 pips min
             else:
-                max_sl_points = 250  # 25 pips max for other setups
-                min_sl_points = 80   # 8 pips min (too tight = noise)
+                max_sl_points = 300  # 30 pips max for other setups (OB_FVG_FIB, HTF_ZONE_OB_CHOCH)
+                min_sl_points = 100  # 10 pips min
         
-        # Validate SL range
-        if sl_points < min_sl_points:
-            return None, None, 0  # Too tight
+        # Use the LARGER of static minimum or ATR-based minimum
+        effective_min = max(min_sl_points, atr_min_sl)
+        
+        # If SL is too tight, widen it to the minimum
+        if sl_points < effective_min:
+            # Instead of rejecting, widen SL to minimum distance
+            min_sl_distance = effective_min * point_value
+            if direction == 'long':
+                stop_loss = entry - min_sl_distance
+            else:
+                stop_loss = entry + min_sl_distance
+            sl_distance = min_sl_distance
+            sl_points = effective_min
         
         # If SL is too big, cap it to max allowed
         if sl_points > max_sl_points:
@@ -1090,6 +1425,12 @@ class FlexibleICTStrategy:
             take_profit = entry + (sl_distance * rr_multiplier)
         else:
             take_profit = entry - (sl_distance * rr_multiplier)
+        
+        # Final sanity check — SL/TP must be on correct sides
+        if direction == 'long' and (stop_loss >= entry or take_profit <= entry):
+            return None, None, 0
+        if direction == 'short' and (stop_loss <= entry or take_profit >= entry):
+            return None, None, 0
         
         risk = abs(entry - stop_loss)
         reward = abs(take_profit - entry)
@@ -1146,6 +1487,9 @@ class FlexibleICTStrategy:
             mtf_data: Multi-timeframe data {'4H': [...], '1H': [...], '15M': [...], '5M': [...]}
             backtest_mode: If True, use candle timestamp for session checks instead of current time
         """
+        import logging
+        _log = logging.getLogger('strategy')
+        
         # Reset rejection reasons and stats flags
         self._last_rejection_reasons = []
         self._last_sweep_found = False
@@ -1189,7 +1533,8 @@ class FlexibleICTStrategy:
             if is_blackout:
                 self._last_rejection_reasons.append(news_reason)
                 return None
-            return None
+        
+        _log.info(f"📊 [{symbol}] Passed session/news filters — analyzing setups... (price: {base_candles[-1]['close']:.5f})")
         
         # Check if we already took a trade for this symbol today
         if not self.can_take_trade(current_timestamp, symbol):
@@ -1197,23 +1542,30 @@ class FlexibleICTStrategy:
             return None
         
         # Determine priority based on symbol
-        # Focus on Option 1 only for EU/GU as it has the best win rate (55%+)
-        # Option 2 and 3 have lower win rates and drag down performance
-        if symbol == 'XAUUSD':
-            options = [self.try_option_2, self.try_option_1]  # Gold prefers HTF zones
-        else:  # EU, GU - use Option 1 only for best win rate
-            options = [self.try_option_1]
+        # Use all setup options - try in order of selectivity
+        if 'XAU' in symbol:
+            options = [self.try_option_2, self.try_option_1, self.try_option_3,
+                       lambda c, s=symbol: self.try_option_4(c, s)]
+        else:  # EU, GU - try all options including liquidity sweep + engulfing
+            options = [self.try_option_1, self.try_option_2, self.try_option_3,
+                       lambda c, s=symbol: self.try_option_4(c, s)]
         
         setup_data = None
         for option_func in options:
-            setup_data = option_func(base_candles, symbol)
+            try:
+                setup_data = option_func(base_candles, symbol)
+            except TypeError:
+                # try_option_3 only takes candles, no symbol arg
+                setup_data = option_func(base_candles)
             if setup_data:
+                _log.info(f"✅ [{symbol}] Setup found: {setup_data['setup_type'].value} ({setup_data['direction']}) - Confirmations: {setup_data['confirmations']}")
                 break
         
         if not setup_data:
             # Rejection reasons already added by try_option methods
             if not self._last_rejection_reasons:
                 self._last_rejection_reasons.append("No valid ICT setup pattern")
+            _log.info(f"❌ [{symbol}] No setup: {'; '.join(self._last_rejection_reasons)}")
             return None
         
         direction = setup_data['direction']
@@ -1223,17 +1575,29 @@ class FlexibleICTStrategy:
         # 1. Correlation Filter - prevent opposite signals on EU/GBP
         if self.check_correlation_conflict(symbol, direction, current_timestamp):
             self._last_rejection_reasons.append("Correlation conflict (opposite signal on related pair)")
+            _log.info(f"⚠️ [{symbol}] Rejected: Correlation conflict")
             return None
         
         # 2. 15M Confirmation - ensure 15M structure agrees
         if not self.check_15m_confirmation(direction):
             self._last_rejection_reasons.append("15M structure conflicts with trade direction")
+            _log.info(f"⚠️ [{symbol}] Rejected: 15M structure conflicts")
             return None
         
         # 3. 5M Entry Trigger - wait for 5M ChoCH before entry
-        if not self.check_5m_entry_trigger(base_candles, direction):
-            self._last_rejection_reasons.append("No 5M ChoCH confirmation yet (wait for LTF entry)")
-            return None
+        #    SKIP for Option 4 (engulfing IS the trigger) and for setups with 3+ confirmations
+        setup_type = setup_data.get('setup_type')
+        confirmation_count = len(setup_data.get('confirmations', []))
+        is_engulfing_setup = (setup_type == SetupType.OPTION_4)
+        has_strong_confirmations = (confirmation_count >= 3)
+        
+        if not is_engulfing_setup and not has_strong_confirmations:
+            if not self.check_5m_entry_trigger(base_candles, direction):
+                self._last_rejection_reasons.append("No 5M ChoCH confirmation yet (wait for LTF entry)")
+                _log.info(f"⚠️ [{symbol}] Rejected: No 5M ChoCH trigger")
+                return None
+        elif not self.check_5m_entry_trigger(base_candles, direction):
+            _log.info(f"ℹ️ [{symbol}] Skipping ChoCH gate: {'engulfing trigger' if is_engulfing_setup else f'{confirmation_count} confirmations'}")
         
         # 4. Session-specific confidence threshold
         session = self.get_session_type(current_timestamp)
@@ -1280,6 +1644,9 @@ class FlexibleICTStrategy:
         
         # Record signal time for cooldown tracking
         self._last_signal_time[symbol] = current_timestamp
+        
+        # Persist state to disk so cooldowns survive restarts
+        self._save_state()
         
         return {
             'timestamp': current_timestamp,

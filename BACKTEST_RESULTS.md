@@ -1,59 +1,74 @@
+# COMPREHENSIVE BACKTEST RESULTS
+**Generated:** 2026-02-08 22:21:01
+**Strategy:** Flexible ICT Strategy (3 Setup Options)
+**Initial Balance:** $10,000.00
 
-=================================================================
-FLEXIBLE ICT STRATEGY - BACKTEST RESULTS
-=================================================================
-Test Period: 60 days (Nov 2025 - Feb 2026)
-Data Source: yfinance CME Futures (6E=F, 6B=F)
+---
 
-STRATEGY CONFIGURATION:
------------------------
-✓ HTF Bias: 4H and 1H must both align (bullish or bearish)
-✓ Liquidity Sweep: Asian range sweep or equal highs/lows sweep
-✓ Displacement BoS: Impulsive break of structure (1.5x avg candle)
-✓ Entry: Price taps into FVG or OB (with rejection candle)
-✓ Session Filter: 10:00-17:00 UTC only (no Friday)
-✓ Trade Limit: 1 trade per day per pair
-✓ SL: Beyond swept liquidity level + 5 pip buffer
-✓ TP: 3x SL (1:3 Risk:Reward)
+## 📊 OVERALL PERFORMANCE
 
-EURUSD RESULTS (RECOMMENDED):
------------------------------
-Total Trades: 11
-Wins: 5
-Losses: 6
-Win Rate: 45.5%
-Profit Factor: 2.55
-Total P&L: +3,870 points
-Max Drawdown: 550 points
+- **Total Trades:** 0
+- **Wins:** 0 | **Losses:** 0
+- **Win Rate:** 0.0%
+- **Profit Factor:** 0.00
+- **Total P&L:** $0.00 (+0.00%)
 
-GBPUSD RESULTS (NOT RECOMMENDED):
----------------------------------
-Total Trades: 7
-Wins: 2
-Losses: 5
-Win Rate: 28.6%
-Profit Factor: 0.62
-Total P&L: -510 points
+---
 
-COMBINED RESULTS:
------------------
-Win Rate: 38.9%
-Profit Factor: 1.64
-Total P&L: +1,845 points
+## 💱 PER-PAIR RESULTS
 
-MATHEMATICAL ANALYSIS:
-----------------------
-With 1:3 RR, breakeven win rate is 25%
-45.5% win rate gives theoretical PF of 2.50 (actual: 2.55 ✓)
-60% win rate with 1:3 RR would require PF of 4.50 (extremely rare)
+### EURUSD
 
-RECOMMENDATION:
----------------
-1. Trade EURUSD only (45.5% win rate, PF 2.55)
-2. Focus on 10:00-17:00 UTC sessions
-3. Avoid Friday trading
-4. Max 1 trade per day
-5. Wait for rejection candle at entry zone
+| Metric | Value |
+|--------|-------|
+| Total Trades | 0 |
+| Wins / Losses | 0 / 0 |
+| Win Rate | 0.0% |
+| Profit Factor | 0.00 |
+| Total P&L | $0.00 (+0.00%) |
+| Max Drawdown | 0.00% |
+| **Verdict** | ❌ **NOT RECOMMENDED** |
 
-The strategy is PROFITABLE for EURUSD with proper ICT execution!
-=================================================================
+### GBPUSD
+
+| Metric | Value |
+|--------|-------|
+| Total Trades | 0 |
+| Wins / Losses | 0 / 0 |
+| Win Rate | 0.0% |
+| Profit Factor | 0.00 |
+| Total P&L | $0.00 (+0.00%) |
+| Max Drawdown | 0.00% |
+| **Verdict** | ❌ **NOT RECOMMENDED** |
+
+### XAUUSD
+
+| Metric | Value |
+|--------|-------|
+| Total Trades | 0 |
+| Wins / Losses | 0 / 0 |
+| Win Rate | 0.0% |
+| Profit Factor | 0.00 |
+| Total P&L | $0.00 (+0.00%) |
+| Max Drawdown | 0.00% |
+| **Verdict** | ❌ **NOT RECOMMENDED** |
+
+---
+
+## ⚙️ STRATEGY CONFIGURATION
+
+**Setup Options:**
+1. HTF Bias + Liquidity Sweep + BoS
+2. HTF Zone + Order Block + ChoCH
+3. OB + FVG + Fib 79%
+
+**Risk Management:**
+- 3 confirmations → 1% risk
+- 2 confirmations → 0.5% risk
+- Target R:R: 1:2
+- Max daily loss: 1.5%
+- Max trades per day: 1
+
+**Session Filter:**
+- London: 08:00-17:00 UTC
+- New York: 13:00-22:00 UTC
