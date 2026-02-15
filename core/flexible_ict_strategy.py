@@ -1546,13 +1546,24 @@ class FlexibleICTStrategy:
             return None
         
         # Determine priority based on symbol
-        # Use all setup options - try in order of selectivity
+        # Only use PROVEN setups per pair (based on journal data):
+        #   HTF_LIQUIDITY_BOS: 50% WR — solid on EU/GU
+        #   LIQ_SWEEP_ENGULF: 100% WR — your manual setup style
+        #   OB_FVG_FIB: 0% on GU, 20% overall — DISABLED for forex (bad OB/FVG detection)
+        #   HTF_ZONE_OB_CHOCH: 0% WR — DISABLED everywhere
         if 'XAU' in symbol:
-            options = [self.try_option_2, self.try_option_1, self.try_option_3,
-                       lambda c, s=symbol: self.try_option_4(c, s)]
-        else:  # EU, GU - try all options including liquidity sweep + engulfing
-            options = [self.try_option_1, self.try_option_2, self.try_option_3,
-                       lambda c, s=symbol: self.try_option_4(c, s)]
+            # Gold: only HTF_LIQUIDITY_BOS (others were 0% WR)
+            options = [
+                self.try_option_1,
+                lambda c, s=symbol: self.try_option_4(c, s),
+            ]
+        else:  # EU, GU - only proven setups
+            options = [
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF (100% WR)
+                # self.try_option_2,                                  # HTF_ZONE_OB_CHOCH — DISABLED (0% WR)
+                # self.try_option_3,                                  # OB_FVG_FIB — DISABLED (20% WR, wrong OB/FVG)
+            ]
         
         setup_data = None
         for option_func in options:
