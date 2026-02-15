@@ -118,13 +118,7 @@ class DailyReportTracker:
         # Save to JSON (for backward compatibility)
         self.data['signals_generated'].append(signal_record)
         
-        # Save to database (persistent storage)
-        if self.db:
-            try:
-                self.db.save_signal(signal_record)
-                logger.info(f"Signal saved to database: {symbol} {signal.get('direction')}")
-            except Exception as e:
-                logger.error(f"Failed to save signal to database: {e}")
+        # Note: DB save is handled by the webhook server to avoid duplicates
         
         # Record hourly activity
         hour = datetime.now().hour

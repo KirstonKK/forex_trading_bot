@@ -100,6 +100,15 @@ except ImportError:
     trades_db = None
     DB_AVAILABLE = False
 
+# Import Signal Journal for weekly performance tracking
+try:
+    from integrations.signal_journal import get_signal_journal
+    signal_journal = get_signal_journal(db=trades_db) if DB_AVAILABLE else None
+    JOURNAL_AVAILABLE = bool(signal_journal)
+except ImportError:
+    signal_journal = None
+    JOURNAL_AVAILABLE = False
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -770,6 +779,64 @@ def get_signal_stats_endpoint():
     return jsonify({'status': 'error', 'message': 'Database not available'}), 500
 
 
+# ===== TRADING JOURNAL ENDPOINTS =====
+
+@app.route('/journal/check', methods=['POST'])
+def journal_check_outcomes():
+    """Check all pending signals for TP/SL outcomes. Call this before generating the weekly report."""
+    if not JOURNAL_AVAILABLE:
+        return jsonify({'status': 'error', 'message': 'Signal journal not available'}), 500
+    
+    try:
+        results = signal_journal.resolve_all_pending()
+        return jsonify({'status': 'success', 'results': results})
+    except Exception as e:
+        logger.error(f"Journal check error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/journal/weekly', methods=['GET', 'POST'])
+def journal_weekly_report():
+    """
+    GET: View weekly report as JSON
+    POST: Resolve outcomes + generate report + send to Telegram
+    """
+    if not JOURNAL_AVAILABLE:
+        return jsonify({'status': 'error', 'message': 'Signal journal not available'}), 500
+    
+    week_offset = int(request.args.get('week', 0))  # 0=current, -1=last week
+    
+    try:
+        if request.method == 'POST':
+            # First resolve all pending outcomes
+            resolve_results = signal_journal.resolve_all_pending()
+            logger.info(f"📓 Resolved outcomes: {resolve_results}")
+        
+        # Generate report
+        report = signal_journal.generate_weekly_report(week_offset=week_offset)
+        
+        if request.method == 'POST' and report.get('total_signals', 0) > 0:
+            # Format and send to Telegram
+            telegram_text = signal_journal.format_telegram_report(report)
+            
+            sent = False
+            if telegram_notifier:
+                sent = telegram_notifier.send_message(telegram_text, parse_mode='HTML')
+            if telegram_group_notifier:
+                telegram_group_notifier.send_message(telegram_text, parse_mode='HTML')
+            
+            report['telegram_sent'] = sent
+            report['resolve_results'] = resolve_results
+        
+        # Remove full signal list from JSON response (too verbose)
+        report_summary = {k: v for k, v in report.items() if k != 'signals'}
+        return jsonify({'status': 'success', 'report': report_summary})
+    
+    except Exception as e:
+        logger.error(f"Weekly report error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/report/daily', methods=['GET', 'POST'])
 def get_daily_report():
     """Get or send daily trading report."""
@@ -1209,6 +1276,7 @@ if __name__ == '__main__':
         now_dt = dt_inner.now(timezone.utc)
         last_report_date = now_dt.date()
         last_weekly_date = now_dt.date() if now_dt.weekday() == 6 else None
+        last_journal_date = now_dt.date() if now_dt.weekday() == 4 and now_dt.hour >= 22 else None
         
         # Track session alerts (prevent duplicates)
         last_session_start_date = now_dt.date() if 10 <= now_dt.hour < 17 else None
@@ -1307,6 +1375,35 @@ if __name__ == '__main__':
                         reporter.save_weekly_archive()
                         logger.info("📊 Weekly report sent to Telegram (personal + group)")
                         last_weekly_date = today
+                
+                # === WEEKLY TRADING JOURNAL (Friday 22:00 UTC) ===
+                # Send after NY close, before weekend
+                if now.weekday() == 4 and now.hour >= 22 and last_journal_date != today:
+                    if JOURNAL_AVAILABLE and signal_journal:
+                        try:
+                            # Resolve all pending outcomes first
+                            resolve_results = signal_journal.resolve_all_pending()
+                            logger.info(f"📓 Journal: resolved {resolve_results.get('resolved', 0)} outcomes")
+                            
+                            # Generate and send weekly report
+                            report = signal_journal.generate_weekly_report(week_offset=0)
+                            if report.get('total_signals', 0) > 0:
+                                journal_text = signal_journal.format_telegram_report(report)
+                                
+                                # Send to personal
+                                if telegram_notifier:
+                                    telegram_notifier.send_message(journal_text, parse_mode='HTML')
+                                # Send to group
+                                if telegram_group_notifier:
+                                    telegram_group_notifier.send_message(journal_text, parse_mode='HTML')
+                                
+                                logger.info(f"📓 Weekly trading journal sent (WR: {report['win_rate']:.1f}%, Pips: {report['total_pips']:+.1f})")
+                            else:
+                                logger.info("📓 Weekly journal: no signals to report")
+                            
+                            last_journal_date = today
+                        except Exception as e:
+                            logger.error(f"Weekly journal error: {e}")
                 
                 # Check every 30 minutes
                 time_module.sleep(1800)

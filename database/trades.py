@@ -98,6 +98,24 @@ class TradesDatabase:
             )
         """)
         
+        # === Migration: Add outcome tracking columns ===
+        try:
+            cursor.execute("ALTER TABLE signals ADD COLUMN outcome TEXT DEFAULT 'PENDING'")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE signals ADD COLUMN outcome_time TIMESTAMP")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE signals ADD COLUMN outcome_price REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cursor.execute("ALTER TABLE signals ADD COLUMN pips_result REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            pass
+        
         conn.commit()
         conn.close()
 
@@ -244,10 +262,25 @@ class TradesDatabase:
             return []
     
     def save_signal(self, signal_dict: Dict) -> bool:
-        """Save a trading signal to database."""
+        """Save a trading signal to database (with duplicate prevention)."""
         try:
             conn = self.get_connection()
             cursor = conn.cursor()
+            
+            # Duplicate prevention: skip if same symbol+direction+entry exists within 5 minutes
+            cursor.execute("""
+                SELECT COUNT(*) FROM signals 
+                WHERE symbol = ? AND direction = ? 
+                AND ABS(entry_price - ?) < 0.001
+                AND timestamp > datetime('now', '-5 minutes')
+            """, (
+                signal_dict.get('symbol'),
+                signal_dict.get('direction'),
+                signal_dict.get('entry_price', 0)
+            ))
+            if cursor.fetchone()[0] > 0:
+                conn.close()
+                return True  # Already saved, skip silently
             
             # Convert confirmations list to JSON string
             import json
@@ -415,3 +448,57 @@ class TradesDatabase:
         except Exception as e:
             print(f"Error getting signal stats: {e}")
             return {}
+
+    def get_pending_signals(self) -> List[Dict]:
+        """Get all signals with outcome='PENDING' that need checking."""
+        try:
+            conn = self.get_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM signals WHERE outcome = 'PENDING' OR outcome IS NULL
+                ORDER BY timestamp ASC
+            """)
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error getting pending signals: {e}")
+            return []
+
+    def update_signal_outcome(self, signal_id: int, outcome: str, 
+                               outcome_price: float, outcome_time: str,
+                               pips_result: float) -> bool:
+        """Update a signal with its TP/SL outcome."""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE signals 
+                SET outcome = ?, outcome_price = ?, outcome_time = ?, pips_result = ?
+                WHERE id = ?
+            """, (outcome, outcome_price, outcome_time, pips_result, signal_id))
+            conn.commit()
+            conn.close()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"Error updating signal outcome: {e}")
+            return False
+
+    def get_signals_for_week(self, week_start: str, week_end: str) -> List[Dict]:
+        """Get all signals within a date range for weekly report."""
+        try:
+            conn = self.get_connection()
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM signals 
+                WHERE DATE(timestamp) >= ? AND DATE(timestamp) <= ?
+                ORDER BY timestamp ASC
+            """, (week_start, week_end))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"Error getting weekly signals: {e}")
+            return []

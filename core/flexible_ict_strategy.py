@@ -1451,23 +1451,27 @@ class FlexibleICTStrategy:
         return risk_map.get(min(confirmation_count, 3), 0.0)
     
     def can_take_trade(self, timestamp: int, symbol: str = 'EURUSD') -> bool:
-        """Check daily limits (max 1 trade/day per symbol for highest quality)."""
+        """Check daily limits (max 3 trades/day per symbol).
+        
+        Note: 4-hour cooldown is handled separately by check_signal_cooldown().
+        """
         current_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
         
         # Reset all counters on new day
         if self.current_date != current_date:
             self.current_date = current_date
             self.trades_today = {}  # Reset all pairs
+            self._save_state()
         
         # Get trade count for this specific symbol
         symbol_trades = self.trades_today.get(symbol, 0)
         
-        # Only 1 trade per day per pair for highest win rate
-        # The first setup of the day is usually the cleanest
-        if symbol_trades >= 1:
+        # Allow up to 3 signals per day per pair
+        # Catches London open, NY session, and late-session setups
+        if symbol_trades >= 3:
+            _log.debug(f"⏸️ [{symbol}] Daily limit reached ({symbol_trades}/3)")
             return False
         
-        # Session check is now done at the top of analyze()
         return True
     
     def record_trade(self, symbol: str):
