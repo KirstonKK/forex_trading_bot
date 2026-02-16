@@ -24,6 +24,7 @@ from typing import Dict, List
 # Import strategy only (no broker connectors)
 from core.flexible_ict_strategy import FlexibleICTStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
+from integrations.news_filter import is_reduced_liquidity_day
 
 # Import PulseGraph advisory integration
 try:
@@ -482,6 +483,16 @@ def webhook():
             len(market_data[symbol].get('15M', {}).get('close', [])) >= 50 and
             len(market_data[symbol].get('5M', {}).get('close', [])) >= 50):
             
+            # ── Bank holiday gate: skip signal generation on low-liquidity days ──
+            is_holiday, holiday_name = is_reduced_liquidity_day()
+            if is_holiday:
+                logger.info(f"🏦 {holiday_name} — skipping analysis for {symbol}")
+                return jsonify({
+                    'status': 'holiday_skip',
+                    'message': holiday_name,
+                    'symbol': symbol
+                }), 200
+            
             # Run strategy analysis
             current_price = data.get('close', 0)
             
@@ -672,9 +683,12 @@ def dashboard():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
+    is_holiday, holiday_name = is_reduced_liquidity_day()
     return jsonify({
         'status': 'running',
         'mode': 'analysis_only',
+        'bank_holiday': holiday_name if is_holiday else None,
+        'trading_active': not is_holiday,
         'symbols_tracked': list(market_data.keys()),
         'timestamp': datetime.now().isoformat()
     })

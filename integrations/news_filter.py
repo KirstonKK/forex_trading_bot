@@ -1,13 +1,103 @@
 """
 News Event Filter
-Pauses trading during high-impact economic events
+Pauses trading during high-impact economic events and bank holidays.
+Bank holidays = reduced liquidity = wider spreads = higher risk of false signals.
 """
 
 import requests
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta, date
+from typing import List, Dict, Optional, Tuple
 import json
 import os
+
+
+# ──────────────────────────────────────────────────────────────
+# US / UK / EU bank holidays that reduce forex liquidity
+# Forex markets technically stay open, but spreads widen and
+# institutional flow drops significantly. We treat these as
+# "reduced liquidity" days and skip signal generation.
+# ──────────────────────────────────────────────────────────────
+BANK_HOLIDAYS = {
+    # ===== 2026 =====
+    # US holidays
+    date(2026, 1, 1):   {"name": "New Year's Day",        "region": "US/UK/EU"},
+    date(2026, 1, 19):  {"name": "Martin Luther King Jr. Day", "region": "US"},
+    date(2026, 2, 16):  {"name": "Presidents' Day",       "region": "US"},
+    date(2026, 4, 3):   {"name": "Good Friday",           "region": "US/UK/EU"},
+    date(2026, 5, 25):  {"name": "Memorial Day",          "region": "US"},
+    date(2026, 7, 3):   {"name": "Independence Day (observed)", "region": "US"},
+    date(2026, 9, 7):   {"name": "Labor Day",             "region": "US"},
+    date(2026, 11, 26): {"name": "Thanksgiving Day",      "region": "US"},
+    date(2026, 11, 27): {"name": "Black Friday (half day)", "region": "US"},
+    date(2026, 12, 25): {"name": "Christmas Day",         "region": "US/UK/EU"},
+    # UK holidays
+    date(2026, 4, 6):   {"name": "Easter Monday",         "region": "UK/EU"},
+    date(2026, 5, 4):   {"name": "Early May Bank Holiday", "region": "UK"},
+    date(2026, 5, 25):  {"name": "Spring Bank Holiday",   "region": "UK"},  # same as Memorial Day
+    date(2026, 8, 31):  {"name": "Summer Bank Holiday",   "region": "UK"},
+    date(2026, 12, 26): {"name": "Boxing Day",            "region": "UK"},
+    date(2026, 12, 28): {"name": "Boxing Day (substitute)", "region": "UK"},
+    # EU holidays (ECB closed)
+    date(2026, 1, 6):   {"name": "Epiphany (parts of EU)", "region": "EU"},
+    date(2026, 5, 1):   {"name": "Labour Day",            "region": "EU"},
+
+    # ===== 2027 =====
+    date(2027, 1, 1):   {"name": "New Year's Day",        "region": "US/UK/EU"},
+    date(2027, 1, 18):  {"name": "Martin Luther King Jr. Day", "region": "US"},
+    date(2027, 2, 15):  {"name": "Presidents' Day",       "region": "US"},
+    date(2027, 3, 26):  {"name": "Good Friday",           "region": "US/UK/EU"},
+    date(2027, 3, 29):  {"name": "Easter Monday",         "region": "UK/EU"},
+    date(2027, 5, 3):   {"name": "Early May Bank Holiday", "region": "UK"},
+    date(2027, 5, 31):  {"name": "Memorial Day / Spring Bank Holiday", "region": "US/UK"},
+    date(2027, 7, 5):   {"name": "Independence Day (observed)", "region": "US"},
+    date(2027, 9, 6):   {"name": "Labor Day",             "region": "US"},
+    date(2027, 11, 25): {"name": "Thanksgiving Day",      "region": "US"},
+    date(2027, 11, 26): {"name": "Black Friday (half day)", "region": "US"},
+    date(2027, 12, 25): {"name": "Christmas Day",         "region": "US/UK/EU"},
+    date(2027, 12, 27): {"name": "Boxing Day (substitute)", "region": "UK"},
+}
+
+
+def is_bank_holiday(check_date: date = None) -> Tuple[bool, Optional[str]]:
+    """
+    Check if a given date is a bank holiday that reduces forex liquidity.
+
+    Returns:
+        (is_holiday: bool, holiday_name: str or None)
+    """
+    if check_date is None:
+        check_date = date.today()
+
+    # Accept datetime objects too
+    if isinstance(check_date, datetime):
+        check_date = check_date.date()
+
+    holiday = BANK_HOLIDAYS.get(check_date)
+    if holiday:
+        return True, f"{holiday['name']} ({holiday['region']})"
+    return False, None
+
+
+def is_reduced_liquidity_day(check_date: date = None) -> Tuple[bool, Optional[str]]:
+    """
+    Broader check: bank holiday OR day before/after major holidays
+    (Dec 24, Dec 31, day after Thanksgiving already covered).
+    """
+    is_hol, name = is_bank_holiday(check_date)
+    if is_hol:
+        return True, f"🏦 Bank Holiday: {name}"
+
+    if check_date is None:
+        check_date = date.today()
+    if isinstance(check_date, datetime):
+        check_date = check_date.date()
+
+    # Dec 24 and Dec 31 are half-days with very thin liquidity
+    if check_date.month == 12 and check_date.day in (24, 31):
+        return True, "🏦 Holiday Eve — thin liquidity expected"
+
+    return False, None
+
 
 class NewsFilter:
     """Filter to pause trading around high-impact news events"""
@@ -61,7 +151,7 @@ class NewsFilter:
         """
         self.buffer_minutes = buffer_minutes
         self.cached_events: List[Dict] = []
-        self.cache_file = "/home/juujuaddy/forex_trading_bot/data/news_cache.json"
+        self.cache_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "news_cache.json")
         self.last_fetch = None
         self._load_cache()
     

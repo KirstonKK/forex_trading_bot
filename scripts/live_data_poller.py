@@ -23,6 +23,8 @@ except ImportError:
     # Fallback: use fixed UTC offset for EST (-5 hours)
     EST = timezone(timedelta(hours=-5))
 
+from integrations.news_filter import is_reduced_liquidity_day
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -46,12 +48,21 @@ def is_forex_market_open():
     """
     Check if forex markets are currently open.
     Forex markets are open from Sunday 5pm EST to Friday 5pm EST.
+    Also checks for bank holidays (reduced liquidity days).
     Returns: (is_open: bool, next_open: datetime or None, message: str)
     """
     now_est = datetime.now(EST)
     weekday = now_est.weekday()  # Monday=0, Sunday=6
     hour = now_est.hour
     
+    # ── Bank holiday check ──
+    is_holiday, holiday_name = is_reduced_liquidity_day(now_est.date())
+    if is_holiday:
+        # Calculate next trading day (skip to tomorrow, recheck then)
+        next_open = now_est.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return False, next_open, f"Market skip: {holiday_name} — reduced liquidity"
+    
+    # ── Weekend check ──
     # Market is CLOSED:
     # - Friday after 5pm EST (weekday=4, hour >= 17)
     # - All day Saturday (weekday=5)
