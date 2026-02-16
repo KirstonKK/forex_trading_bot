@@ -7,7 +7,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import time
 
-from core.smc_strategy import SMCAnalyzer, SMCEntrySignal
+from core.legacy.smc_strategy import SMCAnalyzer, SMCEntrySignal
 from core.enhanced_risk_manager import EnhancedRiskManager, TradingSession
 from core.trade_executor import TradeExecutor, ActiveTrade
 from connectors.forex_api import ForexConnector, MT5Connector

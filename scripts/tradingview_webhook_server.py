@@ -493,6 +493,16 @@ def webhook():
                 '5M': convert_to_candles_list(market_data[symbol]['5M'])
             }
             
+            # Build all_market_data for SMT divergence (Option 5 needs correlated pair data)
+            all_market = {}
+            for sym_key, sym_data in market_data.items():
+                if all(tf in sym_data and len(sym_data[tf].get('close', [])) >= 20 for tf in ['5M', '1H']):
+                    all_market[sym_key] = {
+                        '5M': convert_to_candles_list(sym_data['5M']),
+                        '1H': convert_to_candles_list(sym_data['1H']),
+                    }
+            strategy.set_all_market_data(all_market)
+            
             # Use new flexible strategy with 3 setup options and MTF data
             signal = strategy.analyze(mtf_data['5M'], symbol=symbol, mtf_data=mtf_data)
             

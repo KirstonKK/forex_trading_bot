@@ -28,11 +28,11 @@ RUN pip install --upgrade pip && \
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p data logs backtests/results
+RUN mkdir -p data logs scripts/backtests/results
 
 # Expose ports for potential monitoring/API
 EXPOSE 8000 5001
 
 # Set default command to run backtests
 # Can be overridden by user
-CMD ["python3", "backtests/scripts/run_quick_backtest.py"]
+CMD ["python3", "scripts/backtests/run_quick_backtest.py"]

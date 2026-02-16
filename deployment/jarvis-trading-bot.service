@@ -1,18 +1,19 @@
 [Unit]
-Description=Jarvis Forex Trading Bot - Complete System
-After=network.target
+Description=Jarvis Forex Bot - Complete System
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=juujuaddy
-WorkingDirectory=/home/juujuaddy/forex_trading_bot
-ExecStart=/home/juujuaddy/forex_trading_bot/scripts/start_bot_simple.sh
+User=vanhansen53
+WorkingDirectory=/home/vanhansen53/forex_trading_bot
+Environment="PATH=/home/vanhansen53/.pyenv/versions/3.10.19/envs/forex-bot/bin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/vanhansen53/forex_trading_bot/scripts/start_bot_simple.sh
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:/home/juujuaddy/forex_trading_bot/logs/service.log
-StandardError=append:/home/juujuaddy/forex_trading_bot/logs/service_error.log
-
-# Keep it running
+StandardOutput=append:/home/vanhansen53/forex_trading_bot/logs/service.log
+StandardError=append:/home/vanhansen53/forex_trading_bot/logs/service_error.log
 KillMode=mixed
 TimeoutStopSec=30
 

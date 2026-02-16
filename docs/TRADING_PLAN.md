@@ -166,10 +166,10 @@ To test the strategy:
 
 ```bash
 # Simulation mode (without MT5)
-python3 scripts/test_bot_simulation.py
+python3 scripts/tests/test_bot_simulation.py
 
 # Backtest mode
-python3 backtests/scripts/backtest_realistic_live.py
+python3 scripts/backtests/backtest_realistic_live.py
 
 # Live trading (requires MT5 terminal on Windows/VPS)
 python3 scripts/live_trading_bot.py

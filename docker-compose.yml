@@ -12,9 +12,9 @@ services:
       # Mount local data directory to persist trade journals and results
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./backtests/results:/app/backtests/results
+      - ./scripts/backtests/results:/app/scripts/backtests/results
     # Keep container running
     restart: unless-stopped
     # Run the backtest by default
     # Override with: docker-compose run forex_bot python3 scripts/live_trading_bot.py
-    command: python3 backtests/scripts/run_quick_backtest.py
+    command: python3 scripts/backtests/run_quick_backtest.py

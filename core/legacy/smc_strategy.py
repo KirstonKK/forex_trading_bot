@@ -11,7 +11,7 @@ import numpy as np
 
 # Import enhanced strategy
 try:
-    from core.enhanced_smc_strategy import EnhancedSMCStrategy
+    from core.legacy.enhanced_smc_strategy import EnhancedSMCStrategy
     USE_ENHANCED = True
 except ImportError:
     USE_ENHANCED = False

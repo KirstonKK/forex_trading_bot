@@ -42,13 +42,13 @@ docker-compose up --build
 ### Run Realistic Backtest (2 weeks, 5 minutes)
 
 ```bash
-docker-compose run forex_bot python3 backtests/scripts/backtest_realistic_live.py
+docker-compose run forex_bot python3 scripts/backtests/backtest_realistic_live.py
 ```
 
 ### Run All Backtests
 
 ```bash
-docker-compose run forex_bot python3 backtests/scripts/backtest_runner.py
+docker-compose run forex_bot python3 scripts/backtests/backtest_runner.py
 ```
 
 ### Interactive Shell (Debug Mode)
@@ -87,13 +87,16 @@ docker-compose logs -f
 │   ├── smc_strategy.py    # SMC pattern recognition
 │   └── enhanced_risk_manager.py
 │
-├── backtesting/           # Backtest framework
+├── backtesting/           # Backtest engine (library)
 │   ├── backtest_engine.py
-│   ├── data_fetcher.py
-│   └── scripts/
-│       ├── run_quick_backtest.py   # ← Main entry point
-│       ├── backtest_realistic_live.py
-│       └── backtest_runner.py
+│   └── data_fetcher.py
+│
+├── scripts/               # Executable scripts
+│   ├── backtests/         # All backtest scripts
+│   │   ├── run_quick_backtest.py   # ← Main entry point
+│   │   ├── backtest_realistic_live.py
+│   │   └── backtest_runner.py
+│   └── tests/             # All test scripts
 │
 ├── machine_learning/      # ML models
 │   ├── feature_engineering.py
@@ -208,8 +211,8 @@ docker-compose up --build
 ### Test different timeframes:
 
 ```bash
-# Edit backtests/scripts/run_quick_backtest.py
-vim backtests/scripts/run_quick_backtest.py
+# Edit scripts/backtests/run_quick_backtest.py
+vim scripts/backtests/run_quick_backtest.py
 
 # Change: timeframe = "M5" to "H1" or "D1"
 # Rebuild and run

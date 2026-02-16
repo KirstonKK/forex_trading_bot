@@ -27,7 +27,7 @@ That's it! Docker will:
 docker-compose up --build
 
 # Detailed backtest (2 weeks, 5 min)
-docker-compose run forex_bot python3 backtests/scripts/backtest_realistic_live.py
+docker-compose run forex_bot python3 scripts/backtests/backtest_realistic_live.py
 
 # Interactive shell
 docker-compose run forex_bot bash

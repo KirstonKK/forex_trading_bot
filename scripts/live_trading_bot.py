@@ -18,7 +18,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from connectors.mt5_connector import MT5Connector
-from core.smc_strategy import SMCStrategy
+from core.legacy.smc_strategy import SMCStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
 from database.journal import TradeJournal
 import time

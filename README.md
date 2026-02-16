@@ -29,6 +29,15 @@ forex_trading_bot/
 │   └── fibonacci_liquidity.py         # Fibonacci & liquidity tools
 │
 ├── scripts/                            # Executable scripts
+│   ├── backtests/                     # All backtest scripts
+│   │   ├── backtest_real_data_2024.py
+│   │   ├── backtest_realistic_live.py
+│   │   ├── run_comprehensive_backtest.py
+│   │   └── run_quick_backtest.py
+│   ├── tests/                         # All test scripts
+│   │   ├── test_mt5_connection.py
+│   │   ├── test_webhook_simple.py
+│   │   └── test_webhook_realtime.py
 │   ├── tradingview_webhook_server.py  # Main webhook server ⭐
 │   ├── live_data_poller.py            # Real-time data fetcher ⭐
 │   ├── trading_bot.py                 # Legacy trading bot
@@ -58,9 +67,6 @@ forex_trading_bot/
 │   ├── config.py                      # Configuration loader
 │   └── env_config.py                  # Environment config
 │
-├── tests/                              # Test suite
-│   └── test_mt5_connection.py         # MT5 connection tests
-│
 ├── docs/                               # Documentation
 │   ├── TRADING_PLAN.md                # Original trading plan
 │   ├── DOCKER_SETUP.md                # Docker deployment guide
@@ -76,8 +82,6 @@ forex_trading_bot/
 │
 ├── logs/                               # Log files (gitignored)
 ├── data/                               # Data storage (gitignored)
-├── backtests/                          # Backtest scripts & results
-│
 ├── start_bot.sh                        # Start the trading bot ⭐
 ├── stop_bot.sh                         # Stop the trading bot ⭐
 ├── requirements.txt                    # Python dependencies
@@ -217,23 +221,23 @@ docker-compose down
 
 ```bash
 # Run unit tests
-python -m pytest tests/
+python -m pytest scripts/tests/
 
 # Test webhook server
-python test_webhook_simple.py
+python scripts/tests/test_webhook_simple.py
 
 # Test data connection
-python tests/test_mt5_connection.py
+python scripts/tests/test_mt5_connection.py
 ```
 
 ## 📊 Backtesting
 
 ```bash
 # Run backtest
-python backtests/scripts/backtest_real_data_2024.py
+python scripts/backtests/backtest_real_data_2024.py
 
 # View results
-cat backtests/results/latest_backtest.json
+cat data/latest_backtest.json
 ```
 
 ## ⚠️ Disclaimer

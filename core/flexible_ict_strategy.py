@@ -1,16 +1,24 @@
 """
-Flexible ICT Trading Strategy with 3 Setup Options
+Flexible ICT Trading Strategy with 6 Setup Options
 Based on practical trading plan with realistic confluence requirements.
 
 Setup Options:
 1. HTF Bias + Liquidity Sweep + BoS (Safest - best for EU/GU London)
-2. HTF Zone + OB + ChoCH (Reversal & Continuation - best for NY)
-3. OB + FVG + Fib 79% (Precision Entry - best for clean pullbacks)
+2. HTF Zone + OB + ChoCH (LEGACY - 0% WR, replaced by Option 6)
+3. OB + FVG + Fib 79% (LEGACY - 20% WR, replaced by Option 6)
+4. Liquidity Sweep + Engulfing (Simple price action — 100% WR, PRIORITY for EU)
+5. Full ICT Model: Sweep → BOS + iFVG + SMT + 79% → Continue → Enter → DOL TP
+6. Zone + OB/FVG + Fib + Sweep (Corrected consolidation of Opt 2+3 — 57% WR on GBP)
+
+Pair-Specific Priority (waterfall — first match wins):
+  EURUSD: Option 4 → Option 1 → Option 5 → Option 6
+  GBPUSD: Option 5 → Option 6 → Option 1 → Option 4
+  Gold:   Option 1 → Option 4 → Option 5 → Option 6
 
 Risk Management:
-- 3 confirmations = full risk
-- 2 confirmations = half risk
-- 1 confirmation = no trade
+- 3+ confirmations = full risk (1.0%)
+- 2  confirmations = half risk (0.5%)
+- <2 confirmations = no trade
 """
 
 import os
@@ -19,7 +27,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 from enum import Enum
 from datetime import datetime, timezone
-from core.advanced_filters import AdvancedFilters
+from core.legacy.advanced_filters import AdvancedFilters
 
 # Import news filter (with fallback if not available)
 try:
@@ -37,9 +45,11 @@ class TrendDirection(Enum):
 
 class SetupType(Enum):
     OPTION_1 = "HTF_LIQUIDITY_BOS"  # HTF Bias + Liquidity + BoS
-    OPTION_2 = "HTF_ZONE_OB_CHOCH"  # HTF Zone + OB + ChoCH
-    OPTION_3 = "OB_FVG_FIB"         # OB + FVG + Fib 79%
+    OPTION_2 = "HTF_ZONE_OB_CHOCH"  # HTF Zone + OB + ChoCH (legacy)
+    OPTION_3 = "OB_FVG_FIB"         # OB + FVG + Fib 79% (legacy)
     OPTION_4 = "LIQ_SWEEP_ENGULF"   # Liquidity Sweep + Engulfing (price action)
+    OPTION_5 = "ICT_SWEEP_CONFIRM"  # Sweep + BOS + iFVG + SMT + 79% ext (full ICT model)
+    OPTION_6 = "ZONE_OB_FIB_SWEEP"  # Corrected consolidation of Opt 2+3 (zone + OB/FVG + Fib + sweep)
 
 
 @dataclass
@@ -125,6 +135,16 @@ class FlexibleICTStrategy:
         # Signal cooldown - prevent duplicate/similar signals
         self._last_signal_time = {}  # {'EURUSD': timestamp}
         self._signal_cooldown_minutes = 240  # 4 hours between signals on same pair (was 30min = spam)
+        
+        # All market data for correlated pair access (SMT divergence)
+        self._all_market_data = {}  # {'EUR_USD': {'5M': [...], '1H': [...]}, 'GBP_USD': {...}}
+        
+        # Session levels tracker: {'EUR_USD': {'asia': {'high': x, 'low': y}, 'london': {...}, 'ny': {...}}}
+        self._session_levels = {}
+        
+        # Sweep level dedup: don't re-signal on the same sweep level/direction
+        # {'EUR_USD': {'level': 1.1898, 'direction': 'long', 'timestamp': ...}}
+        self._last_sweep_signal = {}
         
         # Load persisted state from disk (survives restarts)
         self._load_state()
@@ -1258,46 +1278,1271 @@ class FlexibleICTStrategy:
             'htf_zone': None
         }
     
+    # ====================================================================
+    # OPTION 5 COMPONENTS: Full ICT Model
+    # Sweep → 5M Confirm (BOS + iFVG + SMT + 79%) → Continuation → Enter → DOL TP
+    # ====================================================================
+
+    def set_all_market_data(self, all_data: dict):
+        """
+        Store market data for ALL symbols so we can cross-reference for SMT.
+        Called from the webhook server before analyze().
+        
+        Args:
+            all_data: {'EUR_USD': {'5M': [candles], '1H': [candles], ...}, 'GBP_USD': {...}}
+        """
+        self._all_market_data = all_data
+
+    def _get_correlated_pair(self, symbol: str) -> Optional[str]:
+        """Get the correlated pair for SMT divergence comparison."""
+        correlation_map = {
+            'EURUSD': 'GBPUSD', 'EUR_USD': 'GBP_USD',
+            'GBPUSD': 'EURUSD', 'GBP_USD': 'EUR_USD',
+        }
+        return correlation_map.get(symbol)
+
+    def _get_correlated_candles(self, symbol: str, timeframe: str = '5M') -> List[dict]:
+        """Get candles for the correlated pair (for SMT divergence)."""
+        corr_symbol = self._get_correlated_pair(symbol)
+        if not corr_symbol or corr_symbol not in self._all_market_data:
+            return []
+        return self._all_market_data[corr_symbol].get(timeframe, [])
+
+    # --- Session H/L Tracking ---
+
+    def compute_session_levels(self, candles_1h: List[dict], symbol: str) -> dict:
+        """
+        Compute Asia / London / NY session highs and lows from 1H candles.
+        
+        Sessions (UTC):
+            Asia:   00:00 – 08:00
+            London: 07:00 – 16:00  (1h overlap with Asia)
+            NY:     12:00 – 21:00  (4h overlap with London)
+        
+        Returns dict: {
+            'asia':   {'high': float, 'low': float, 'candles': [...]},
+            'london': {'high': float, 'low': float, 'candles': [...]},
+            'ny':     {'high': float, 'low': float, 'candles': [...]},
+            'prev_asia':   {'high': float, 'low': float},
+            'prev_london': {'high': float, 'low': float},
+            'prev_ny':     {'high': float, 'low': float},
+        }
+        """
+        if len(candles_1h) < 24:
+            return {}
+
+        session_defs = {
+            'asia':   (0, 8),
+            'london': (7, 16),
+            'ny':     (12, 21),
+        }
+
+        # Bucket candles by session using their hour
+        from collections import defaultdict
+        buckets = defaultdict(list)           # 'asia' -> [candles]
+        prev_buckets = defaultdict(list)      # 'prev_asia' -> [candles]
+
+        now_utc = datetime.now(timezone.utc)
+        today_midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_midnight = today_midnight.replace(day=today_midnight.day - 1) if today_midnight.day > 1 else today_midnight
+
+        for c in candles_1h:
+            ts = datetime.fromtimestamp(c['timestamp'], tz=timezone.utc)
+            hour = ts.hour
+            is_today = ts >= today_midnight
+
+            for sess_name, (start_h, end_h) in session_defs.items():
+                if start_h <= hour < end_h:
+                    if is_today:
+                        buckets[sess_name].append(c)
+                    else:
+                        prev_buckets[sess_name].append(c)
+
+        result = {}
+        for sess_name in session_defs:
+            # Current session
+            cs = buckets.get(sess_name, [])
+            if cs:
+                result[sess_name] = {
+                    'high': max(c['high'] for c in cs),
+                    'low': min(c['low'] for c in cs),
+                    'candles': cs,
+                }
+            # Previous session
+            ps = prev_buckets.get(sess_name, [])
+            if ps:
+                result[f'prev_{sess_name}'] = {
+                    'high': max(c['high'] for c in ps),
+                    'low': min(c['low'] for c in ps),
+                }
+
+        self._session_levels[symbol] = result
+        return result
+
+    def detect_session_level_sweep(self, candles_5m: List[dict], symbol: str) -> Optional[dict]:
+        """
+        Detect if price swept a session high or low (Asia/London/NY/previous sessions).
+        
+        A sweep = wick past the level followed by close back inside.
+        
+        Returns: {'level': float, 'level_name': str, 'direction': 'long'|'short',
+                  'sweep_candle_idx': int} or None
+        """
+        sess = self._session_levels.get(symbol, {})
+        if not sess:
+            # Try to compute from 1H data if available
+            candles_1h = self.get_htf_candles(60)
+            if candles_1h:
+                sess = self.compute_session_levels(candles_1h, symbol)
+        if not sess:
+            return None
+
+        pip_value = self.get_pip_value(symbol)
+        sweep_tolerance = 2 * pip_value  # Must pierce by at least 2 pips
+
+        # Collect all levels to check
+        levels_to_check = []
+        for sess_name in ['asia', 'london', 'ny', 'prev_asia', 'prev_london', 'prev_ny']:
+            s = sess.get(sess_name)
+            if not s:
+                continue
+            levels_to_check.append({'level': s['high'], 'name': f"{sess_name}_high", 'side': 'high'})
+            levels_to_check.append({'level': s['low'], 'name': f"{sess_name}_low", 'side': 'low'})
+
+        if not levels_to_check:
+            return None
+
+        # Check last 15 candles for sweep
+        recent = candles_5m[-15:] if len(candles_5m) >= 15 else candles_5m
+        for i in range(len(recent) - 1, max(len(recent) - 10, -1), -1):
+            c = recent[i]
+            for lvl in levels_to_check:
+                level_price = lvl['level']
+                if lvl['side'] == 'high':
+                    # Sweep above high: wick above, close below
+                    if (c['high'] > level_price + sweep_tolerance and
+                            c['close'] < level_price):
+                        return {
+                            'level': level_price,
+                            'level_name': lvl['name'],
+                            'direction': 'short',  # Swept high → bearish
+                            'sweep_candle_idx': i,
+                            'sweep_wick': c['high'],
+                        }
+                else:  # low
+                    # Sweep below low: wick below, close above
+                    if (c['low'] < level_price - sweep_tolerance and
+                            c['close'] > level_price):
+                        return {
+                            'level': level_price,
+                            'level_name': lvl['name'],
+                            'direction': 'long',  # Swept low → bullish
+                            'sweep_candle_idx': i,
+                            'sweep_wick': c['low'],
+                        }
+        return None
+
+    def detect_htf_liquidity_sweep(self, candles_5m: List[dict], candles_1h: List[dict],
+                                    candles_4h: List[dict], symbol: str) -> Optional[dict]:
+        """
+        Master sweep detector — checks 1H swing H/L, 4H swing H/L, and session levels.
+        Returns the highest-quality sweep found.
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        pip_value = self.get_pip_value(symbol)
+        results = []
+
+        # 1. Session level sweep (Asia/London/NY)
+        sess_sweep = self.detect_session_level_sweep(candles_5m, symbol)
+        if sess_sweep:
+            sess_sweep['source'] = 'session'
+            sess_sweep['priority'] = 1  # Highest priority
+            results.append(sess_sweep)
+
+        # 2. 1H swing high/low sweep
+        if len(candles_1h) >= 20:
+            swing_levels_1h = self._find_swing_levels(candles_1h, lookback=20)
+            for lvl in swing_levels_1h:
+                recent = candles_5m[-10:] if len(candles_5m) >= 10 else candles_5m
+                for c in recent:
+                    if lvl['side'] == 'high' and c['high'] > lvl['level'] + 2 * pip_value and c['close'] < lvl['level']:
+                        results.append({
+                            'level': lvl['level'], 'level_name': '1H_swing_high',
+                            'direction': 'short', 'source': '1H', 'priority': 2,
+                            'sweep_wick': c['high'],
+                        })
+                    elif lvl['side'] == 'low' and c['low'] < lvl['level'] - 2 * pip_value and c['close'] > lvl['level']:
+                        results.append({
+                            'level': lvl['level'], 'level_name': '1H_swing_low',
+                            'direction': 'long', 'source': '1H', 'priority': 2,
+                            'sweep_wick': c['low'],
+                        })
+
+        # 3. 4H swing high/low sweep
+        if len(candles_4h) >= 15:
+            swing_levels_4h = self._find_swing_levels(candles_4h, lookback=15)
+            for lvl in swing_levels_4h:
+                recent = candles_5m[-10:] if len(candles_5m) >= 10 else candles_5m
+                for c in recent:
+                    if lvl['side'] == 'high' and c['high'] > lvl['level'] + 2 * pip_value and c['close'] < lvl['level']:
+                        results.append({
+                            'level': lvl['level'], 'level_name': '4H_swing_high',
+                            'direction': 'short', 'source': '4H', 'priority': 3,
+                            'sweep_wick': c['high'],
+                        })
+                    elif lvl['side'] == 'low' and c['low'] < lvl['level'] - 2 * pip_value and c['close'] > lvl['level']:
+                        results.append({
+                            'level': lvl['level'], 'level_name': '4H_swing_low',
+                            'direction': 'long', 'source': '4H', 'priority': 3,
+                            'sweep_wick': c['low'],
+                        })
+
+        if not results:
+            return None
+
+        # Return highest priority sweep
+        results.sort(key=lambda x: x['priority'])
+        best = results[0]
+        _log.info(f"🔍 [{symbol}] Opt5 sweep: {best['level_name']} at {best['level']:.5f} → {best['direction']}")
+        return best
+
+    def _find_swing_levels(self, candles: List[dict], lookback: int = 20) -> List[dict]:
+        """Find swing highs and lows from candle data."""
+        levels = []
+        recent = candles[-lookback:] if len(candles) >= lookback else candles
+        for i in range(2, len(recent) - 2):
+            # Swing high
+            if (recent[i]['high'] >= recent[i-1]['high'] and
+                    recent[i]['high'] >= recent[i-2]['high'] and
+                    recent[i]['high'] >= recent[i+1]['high'] and
+                    recent[i]['high'] >= recent[i+2]['high']):
+                levels.append({'level': recent[i]['high'], 'side': 'high', 'idx': i})
+            # Swing low
+            if (recent[i]['low'] <= recent[i-1]['low'] and
+                    recent[i]['low'] <= recent[i-2]['low'] and
+                    recent[i]['low'] <= recent[i+1]['low'] and
+                    recent[i]['low'] <= recent[i+2]['low']):
+                levels.append({'level': recent[i]['low'], 'side': 'low', 'idx': i})
+        return levels
+
+    # --- SMT Divergence ---
+
+    def detect_smt_divergence(self, candles_5m: List[dict], symbol: str,
+                               sweep_info: dict) -> Optional[dict]:
+        """
+        Smart Money Technique (SMT) Divergence.
+        
+        If symbol sweeps a low/high but the correlated pair does NOT make a
+        corresponding new low/high → institutions are manipulating one side.
+        This CONFIRMS the sweep is a genuine trap.
+        
+        Example:
+            EU sweeps Asian low (makes new low) but GU holds its Asian low
+            → EU low sweep is valid → BUY EU
+        
+        Note: Bearish SMT rarely fires because EU/GU tend to push highs together.
+        This is INTENTIONAL — it acts as a strict quality gate for short entries,
+        forcing them to qualify on other confirmations alone.
+        Backtest proved: loosening bearish SMT added 6 signals (5 losses).
+        
+        Returns: {'confirmed': True, 'corr_symbol': str, 'detail': str} or None
+        """
+        corr_candles = self._get_correlated_candles(symbol)
+        if len(corr_candles) < 15:
+            return None  # Can't check SMT without correlated data
+
+        corr_symbol = self._get_correlated_pair(symbol)
+        recent_corr = corr_candles[-15:] if len(corr_candles) >= 15 else corr_candles
+
+        sweep_dir = sweep_info['direction']
+        sweep_level = sweep_info['level']
+
+        if sweep_dir == 'long':
+            # Our pair swept a LOW → check if correlated pair also made a new low
+            our_low = min(c['low'] for c in candles_5m[-15:])
+            corr_low = min(c['low'] for c in recent_corr)
+            # Correlated pair should NOT have made a lower low in the same window
+            # We check: did correlated pair's recent low hold above its prior swing low?
+            corr_prior_lows = [c['low'] for c in corr_candles[-30:-15]] if len(corr_candles) >= 30 else []
+            if corr_prior_lows:
+                corr_prior_swing_low = min(corr_prior_lows)
+                if corr_low > corr_prior_swing_low:
+                    return {
+                        'confirmed': True,
+                        'corr_symbol': corr_symbol,
+                        'detail': f"{symbol} swept low but {corr_symbol} held → bullish SMT",
+                    }
+        else:  # short
+            # Our pair swept a HIGH → check if correlated pair also made a new high
+            corr_high = max(c['high'] for c in recent_corr)
+            corr_prior_highs = [c['high'] for c in corr_candles[-30:-15]] if len(corr_candles) >= 30 else []
+            if corr_prior_highs:
+                corr_prior_swing_high = max(corr_prior_highs)
+                if corr_high < corr_prior_swing_high:
+                    return {
+                        'confirmed': True,
+                        'corr_symbol': corr_symbol,
+                        'detail': f"{symbol} swept high but {corr_symbol} held → bearish SMT",
+                    }
+
+        return None
+
+    # --- Inverted FVG (iFVG) ---
+
+    def find_ifvgs(self, candles: List[dict]) -> List[dict]:
+        """
+        Find Inverted Fair Value Gaps (iFVGs).
+        
+        iFVG lifecycle:
+        1. A regular FVG is created (gap between candle 1 high and candle 3 low)
+        2. Price later TRADES THROUGH the FVG (fills/inverts it)
+        3. The FVG now acts as support/resistance from the OTHER side
+        
+        A bullish FVG that gets traded through becomes bearish iFVG (resistance)
+        A bearish FVG that gets traded through becomes bullish iFVG (support)
+        
+        Returns list of dicts with keys: top, bottom, direction, original_direction, timestamp
+        """
+        if len(candles) < 20:
+            return []
+
+        # Step 1: Find all FVGs in the data
+        all_fvgs = []
+        for i in range(2, len(candles)):
+            prev = candles[i - 2]
+            curr = candles[i - 1]
+            nxt = candles[i]
+
+            # Bullish FVG: gap up (candle 1 high < candle 3 low)
+            if prev['high'] < nxt['low']:
+                all_fvgs.append({
+                    'top': nxt['low'],
+                    'bottom': prev['high'],
+                    'direction': 'bullish',
+                    'timestamp': curr['timestamp'],
+                    'created_idx': i,
+                })
+            # Bearish FVG: gap down (candle 1 low > candle 3 high)
+            elif prev['low'] > nxt['high']:
+                all_fvgs.append({
+                    'top': prev['low'],
+                    'bottom': nxt['high'],
+                    'direction': 'bearish',
+                    'timestamp': curr['timestamp'],
+                    'created_idx': i,
+                })
+
+        # Step 2: Check which FVGs have been traded through (inverted)
+        ifvgs = []
+        for fvg in all_fvgs:
+            created_idx = fvg['created_idx']
+            traded_through = False
+
+            # Check candles AFTER the FVG was created
+            for j in range(created_idx + 1, len(candles)):
+                c = candles[j]
+                if fvg['direction'] == 'bullish':
+                    # Bullish FVG traded through = price dropped below the FVG bottom
+                    if c['close'] < fvg['bottom']:
+                        traded_through = True
+                        break
+                else:
+                    # Bearish FVG traded through = price closed above the FVG top
+                    if c['close'] > fvg['top']:
+                        traded_through = True
+                        break
+
+            if traded_through:
+                # Invert the direction: bullish FVG → bearish iFVG (now resistance)
+                inverted_dir = 'bearish' if fvg['direction'] == 'bullish' else 'bullish'
+                ifvgs.append({
+                    'top': fvg['top'],
+                    'bottom': fvg['bottom'],
+                    'direction': inverted_dir,  # Inverted direction
+                    'original_direction': fvg['direction'],
+                    'timestamp': fvg['timestamp'],
+                })
+
+        return ifvgs[-10:]  # Keep last 10
+
+    def price_at_ifvg(self, candles: List[dict], direction: str) -> Optional[dict]:
+        """
+        Check if current price is at a relevant iFVG for the given direction.
+        
+        For LONG: price should be at a bullish iFVG (support) — was bearish, got inverted
+        For SHORT: price should be at a bearish iFVG (resistance) — was bullish, got inverted
+        """
+        ifvgs = self.find_ifvgs(candles)
+        if not ifvgs:
+            return None
+
+        current_price = candles[-1]['close']
+        pip_value = self.get_pip_value()
+        tolerance = 5 * pip_value
+
+        for ifvg in reversed(ifvgs):  # Most recent first
+            if ifvg['direction'] != ('bullish' if direction == 'long' else 'bearish'):
+                continue
+            if ifvg['bottom'] - tolerance <= current_price <= ifvg['top'] + tolerance:
+                return ifvg
+
+        return None
+
+    # --- 79% Fib Extension ---
+
+    def calc_79_extension(self, sweep_info: dict, candles_5m: List[dict],
+                           direction: str) -> Optional[dict]:
+        """
+        Calculate the 79% (0.79) Fib retracement of the sweep swing.
+        
+        The sweep creates a swing (from the start of the move to the sweep wick).
+        We measure 79% retracement of that swing for precision entry.
+        
+        For LONG (swept low):
+            Swing high = high before the sweep, Swing low = sweep wick
+            79% entry = sweep_low + (swing_high - sweep_low) * 0.79
+        For SHORT (swept high):
+            Swing low = low before the sweep, Swing high = sweep wick
+            79% entry = sweep_high - (sweep_high - swing_low) * 0.79
+        
+        Returns: {'level_79': float, 'swing_high': float, 'swing_low': float,
+                  'eq_level': float (50%)} or None
+        """
+        if len(candles_5m) < 15:
+            return None
+
+        recent = candles_5m[-20:] if len(candles_5m) >= 20 else candles_5m
+
+        if direction == 'long':
+            swing_low = sweep_info.get('sweep_wick', sweep_info['level'])
+            # Find the swing high BEFORE the sweep (the top of the range)
+            swing_high = max(c['high'] for c in recent[:-3]) if len(recent) > 3 else max(c['high'] for c in recent)
+            if swing_high <= swing_low:
+                return None
+            rng = swing_high - swing_low
+            level_79 = swing_low + rng * 0.79
+            eq_level = swing_low + rng * 0.50
+        else:  # short
+            swing_high = sweep_info.get('sweep_wick', sweep_info['level'])
+            # Find the swing low BEFORE the sweep
+            swing_low = min(c['low'] for c in recent[:-3]) if len(recent) > 3 else min(c['low'] for c in recent)
+            if swing_high <= swing_low:
+                return None
+            rng = swing_high - swing_low
+            level_79 = swing_high - rng * 0.79
+            eq_level = swing_high - rng * 0.50
+
+        return {
+            'level_79': level_79,
+            'swing_high': swing_high,
+            'swing_low': swing_low,
+            'eq_level': eq_level,
+            'range': rng,
+        }
+
+    def price_at_79(self, current_price: float, fib_data: dict, direction: str,
+                     symbol: str) -> bool:
+        """Check if price is near the 79% level (within 5 pips / $3 for gold)."""
+        pip_value = self.get_pip_value(symbol)
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        tolerance = 3.00 if is_gold else 5 * pip_value
+        return abs(current_price - fib_data['level_79']) <= tolerance
+
+    def price_at_eq(self, current_price: float, fib_data: dict, symbol: str) -> bool:
+        """Check if price is near equilibrium (50% level)."""
+        pip_value = self.get_pip_value(symbol)
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        tolerance = 3.00 if is_gold else 5 * pip_value
+        return abs(current_price - fib_data['eq_level']) <= tolerance
+
+    # --- Draws on Liquidity (DOL) TP ---
+
+    def find_draws_on_liquidity(self, candles_5m: List[dict], candles_1h: List[dict],
+                                 direction: str, symbol: str) -> Optional[float]:
+        """
+        Find the nearest draw on liquidity in our trade direction for TP.
+        
+        Draws on liquidity (targets price is attracted to):
+        - Previous session high/low
+        - Equal highs/lows
+        - Unfilled FVGs
+        - Previous day high/low
+        
+        Returns: TP price level or None (falls back to R:R based TP)
+        """
+        pip_value = self.get_pip_value(symbol)
+        current_price = candles_5m[-1]['close']
+        candidates = []
+
+        # 1. Session levels as targets
+        sess = self._session_levels.get(symbol, {})
+        for sess_name in ['prev_asia', 'prev_london', 'prev_ny', 'asia', 'london', 'ny']:
+            s = sess.get(sess_name)
+            if not s:
+                continue
+            if direction == 'long' and s['high'] > current_price + 5 * pip_value:
+                candidates.append(s['high'])
+            elif direction == 'short' and s['low'] < current_price - 5 * pip_value:
+                candidates.append(s['low'])
+
+        # 2. Equal highs/lows (liquidity pools)
+        if len(candles_1h) >= 20:
+            eq_tolerance = 3 * pip_value
+            highs = [c['high'] for c in candles_1h[-20:]]
+            lows = [c['low'] for c in candles_1h[-20:]]
+
+            # Find equal highs
+            for i in range(len(highs)):
+                cluster = [highs[i]]
+                for j in range(i + 1, len(highs)):
+                    if abs(highs[j] - highs[i]) < eq_tolerance:
+                        cluster.append(highs[j])
+                if len(cluster) >= 2:
+                    avg = sum(cluster) / len(cluster)
+                    if direction == 'long' and avg > current_price + 5 * pip_value:
+                        candidates.append(avg)
+                    elif direction == 'short' and avg < current_price - 5 * pip_value:
+                        candidates.append(avg)
+
+            # Find equal lows
+            for i in range(len(lows)):
+                cluster = [lows[i]]
+                for j in range(i + 1, len(lows)):
+                    if abs(lows[j] - lows[i]) < eq_tolerance:
+                        cluster.append(lows[j])
+                if len(cluster) >= 2:
+                    avg = sum(cluster) / len(cluster)
+                    if direction == 'long' and avg > current_price + 5 * pip_value:
+                        candidates.append(avg)
+                    elif direction == 'short' and avg < current_price - 5 * pip_value:
+                        candidates.append(avg)
+
+        # 3. Unfilled FVGs (price tends to fill them)
+        fvgs = self.find_fvgs(candles_5m)
+        for fvg in fvgs:
+            mid = (fvg.top + fvg.bottom) / 2
+            if direction == 'long' and fvg.direction == 'bearish' and mid > current_price + 5 * pip_value:
+                candidates.append(mid)
+            elif direction == 'short' and fvg.direction == 'bullish' and mid < current_price - 5 * pip_value:
+                candidates.append(mid)
+
+        if not candidates:
+            return None
+
+        # Return the NEAREST DOL target
+        if direction == 'long':
+            candidates.sort()
+            return candidates[0]  # Closest above
+        else:
+            candidates.sort(reverse=True)
+            return candidates[0]  # Closest below
+
+    # --- Option 5: Full ICT Sweep → Confirm → Continue → Entry → DOL ---
+
+    def _is_active_session(self, timestamp: int) -> Tuple[bool, str]:
+        """
+        Check if a sweep happened during an active session or during premarket/off-session.
+        Active = London or NY kill zones. Off = Asia or gaps between sessions.
+        
+        Returns: (is_active, session_name)
+        """
+        hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
+        if 7 <= hour < 10:
+            return True, 'london_open'
+        if 9 <= hour < 12:
+            return True, 'london'
+        if 12 <= hour < 15:
+            return True, 'ny_open'
+        if 15 <= hour < 17:
+            return True, 'ny'
+        # Off-session
+        if 0 <= hour < 7:
+            return False, 'asian'
+        return False, 'late_session'
+
+    def try_option_5(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+        """
+        Option 5: Full ICT Model — Sweep → Confirm → Continue → Enter → DOL TP
+        
+        FLOW:
+        Step 1: Liquidity sweep (1H / 4H / session H/L)
+        Step 2: 5M confirmations — BOS + iFVG + SMT divergence + 79% extension
+                 Need at least 3 of 4 to confirm
+        Step 2b: IF the sweep is off-session (Asia / premarket) →
+                 require extra continuation confirmation
+        Step 3: 5M continuation — EQ (50%) or FVG or (if 2b) SMT divergence
+        Step 4: 1M confirmation (using 5M as proxy since yfinance 1M is limited)
+                 — BOS on last few 5M candles
+        Step 5: Enter at current price
+        Step 6: Target = draws on liquidity (session H/L, equal H/L, unfilled FVGs)
+        
+        This is the most sophisticated setup — high quality, fewer signals, higher WR.
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        confirmations = []
+
+        # Get multi-timeframe candles
+        candles_5m = candles
+        candles_1h = self.get_htf_candles(60)
+        candles_4h = self.get_htf_candles(240)
+
+        if len(candles_5m) < 50 or len(candles_1h) < 24:
+            self._last_rejection_reasons.append("Opt5: Insufficient MTF data")
+            return None
+
+        # ====== STEP 1: LIQUIDITY SWEEP ======
+        # Compute session levels first
+        self.compute_session_levels(candles_1h, symbol)
+
+        sweep_info = self.detect_htf_liquidity_sweep(candles_5m, candles_1h, candles_4h, symbol)
+        if not sweep_info:
+            # NO fallback to equal H/L — backtest proved those are 20% WR vs 43.8% for structured sweeps
+            self._last_rejection_reasons.append("Opt5: No structured sweep (session/1H/4H levels only)")
+            return None
+
+        direction = sweep_info['direction']
+
+        # Sweep level dedup: don't re-try the same sweep level in the same direction
+        # Prevents hammering 4x on the same 1H swing low when market is trending against us
+        pip_value = self.get_pip_value(symbol)
+        dedup_tolerance = 30 * pip_value  # Within 30 pips = same level
+        dedup_expiry = 24 * 3600  # 24 hours — after that, level is fresh again
+        last = self._last_sweep_signal.get(symbol)
+        if last and last['direction'] == direction:
+            # Check time expiry
+            current_ts = candles_5m[-1].get('timestamp', 0)
+            last_ts = last.get('timestamp_epoch', 0)
+            if (current_ts - last_ts) < dedup_expiry:
+                if abs(sweep_info['level'] - last['level']) < dedup_tolerance:
+                    self._last_rejection_reasons.append(
+                        f"Opt5: Same sweep level already signaled ({sweep_info['level_name']} ~{sweep_info['level']:.5f})")
+                    return None
+
+        confirmations.append(f"SWEEP_{sweep_info.get('level_name', 'unknown').upper()}")
+
+        # Determine if sweep happened in an active session
+        current_timestamp = candles_5m[-1]['timestamp']
+        is_active, session_name = self._is_active_session(current_timestamp)
+
+        # ====== STEP 2: 5M CONFIRMATIONS (need 3/4) ======
+        confirm_count = 0
+
+        # 2a. BOS (Break of Structure)
+        has_bos = self.check_bos(candles_5m, direction)
+        if has_bos:
+            confirmations.append("BOS")
+            confirm_count += 1
+            self._last_bos_found = True
+
+        # 2b. iFVG (Inverted Fair Value Gap)
+        ifvg = self.price_at_ifvg(candles_5m, direction)
+        if ifvg:
+            confirmations.append("iFVG")
+            confirm_count += 1
+
+        # 2c. SMT Divergence (correlated pair doesn't confirm the sweep)
+        smt = self.detect_smt_divergence(candles_5m, symbol, sweep_info)
+        if smt and smt['confirmed']:
+            confirmations.append("SMT_DIVERGENCE")
+            confirm_count += 1
+            _log.info(f"🔀 [{symbol}] SMT: {smt['detail']}")
+
+        # 2d. 79% Fib Extension
+        fib_data = self.calc_79_extension(sweep_info, candles_5m, direction)
+        current_price = candles_5m[-1]['close']
+        if fib_data and self.price_at_79(current_price, fib_data, direction, symbol):
+            confirmations.append("FIB_79_EXT")
+            confirm_count += 1
+
+        # ── Mandatory gates (backtest-proven) ──
+        # BOS is non-negotiable: no structure break = no trade
+        if not has_bos:
+            self._last_rejection_reasons.append("Opt5: No BOS after sweep (mandatory)")
+            return None
+
+        # iFVG is mandatory: 30.6% WR with iFVG vs 18.8% without (backtest data)
+        if not ifvg:
+            self._last_rejection_reasons.append("Opt5: No iFVG at entry (mandatory — 30.6% vs 18.8% WR)")
+            return None
+
+        # FIB_79_EXT is mandatory: 34.5% WR with vs 10% without (backtest data)
+        if not (fib_data and self.price_at_79(current_price, fib_data, direction, symbol)):
+            self._last_rejection_reasons.append("Opt5: Price not at 79% extension (mandatory — 34.5% vs 10% WR)")
+            return None
+
+        # Need at least 3 out of 4 confirmations total
+        if confirm_count < 3:
+            self._last_rejection_reasons.append(
+                f"Opt5: Only {confirm_count}/3 confirmations ({', '.join(confirmations)})")
+            return None
+
+        # ====== STEP 2b: OFF-SESSION FILTER ======
+        # Backtest showed OFF_SESSION_MOMENTUM_OK signals were mostly losers.
+        # Only allow off-session trades if SMT divergence confirms them.
+        if not is_active:
+            if smt and smt['confirmed']:
+                confirmations.append("OFF_SESSION_SMT_OK")
+                _log.info(f"⏰ [{symbol}] Opt5: Off-session ({session_name}) allowed — SMT confirmed")
+            else:
+                self._last_rejection_reasons.append(
+                    f"Opt5: Off-session ({session_name}) — SMT required but not found")
+                return None
+
+        # ====== STEP 3: CONTINUATION (EQ / FVG / SMT) ======
+        has_continuation = False
+
+        # 3a. Price at or past equilibrium (50% of the range)
+        if fib_data and self.price_at_eq(current_price, fib_data, symbol):
+            confirmations.append("EQ_CONTINUATION")
+            has_continuation = True
+
+        # 3b. Price at a regular FVG in direction
+        if not has_continuation:
+            fvgs = self.find_fvgs(candles_5m)
+            pip_value = self.get_pip_value(symbol)
+            tolerance = 8 * pip_value
+            for fvg in reversed(fvgs):
+                expected_dir = 'bearish' if direction == 'long' else 'bullish'
+                if fvg.direction == expected_dir:
+                    if fvg.bottom - tolerance <= current_price <= fvg.top + tolerance:
+                        confirmations.append("FVG_CONTINUATION")
+                        has_continuation = True
+                        break
+
+        # 3c. If from step 2b (off-session sweep), SMT counts as continuation too
+        if not has_continuation and smt and smt['confirmed']:
+            confirmations.append("SMT_CONTINUATION")
+            has_continuation = True
+
+        # 3d. ChoCH as continuation fallback
+        if not has_continuation:
+            if self.check_choch(candles_5m, direction):
+                confirmations.append("CHOCH_CONTINUATION")
+                has_continuation = True
+
+        if not has_continuation:
+            self._last_rejection_reasons.append("Opt5: No continuation signal (need EQ/FVG/SMT/ChoCH)")
+            return None
+
+        # ====== STEP 4: LTF CONFIRM (5M micro-BOS as proxy for 1M) ======
+        # Check the last 5 candles for a micro BOS in direction
+        micro_confirmed = False
+        last_candles = candles_5m[-6:]
+        if len(last_candles) >= 4:
+            if direction == 'long':
+                # Micro bullish: recent close above a prior high
+                prior_high = max(c['high'] for c in last_candles[:-2])
+                if last_candles[-1]['close'] > prior_high or last_candles[-2]['close'] > prior_high:
+                    micro_confirmed = True
+            else:
+                prior_low = min(c['low'] for c in last_candles[:-2])
+                if last_candles[-1]['close'] < prior_low or last_candles[-2]['close'] < prior_low:
+                    micro_confirmed = True
+
+        if not micro_confirmed:
+            self._last_rejection_reasons.append("Opt5: No micro-BOS on 5M (LTF entry trigger)")
+            return None
+        confirmations.append("MICRO_BOS")
+
+        # ====== STEP 5: ENTRY ======
+        entry_price = current_price
+
+        # ====== STEP 6: DOL-BASED TP ======
+        dol_tp = self.find_draws_on_liquidity(candles_5m, candles_1h, direction, symbol)
+
+        _log.info(
+            f"✅ [{symbol}] Option 5 HIT: {direction} | "
+            f"Sweep: {sweep_info['level_name']} | "
+            f"Confirms: {', '.join(confirmations)} | "
+            f"DOL TP: {dol_tp:.5f}" if dol_tp else
+            f"✅ [{symbol}] Option 5 HIT: {direction} | "
+            f"Sweep: {sweep_info['level_name']} | "
+            f"Confirms: {', '.join(confirmations)} | DOL TP: fallback R:R"
+        )
+
+        # Record this sweep level so we don't re-signal on it
+        self._last_sweep_signal[symbol] = {
+            'level': sweep_info['level'],
+            'direction': direction,
+            'level_name': sweep_info.get('level_name', ''),
+            'timestamp': candles[-1].get('time', ''),
+            'timestamp_epoch': candles[-1].get('timestamp', 0),
+        }
+
+        return {
+            'setup_type': SetupType.OPTION_5,
+            'direction': direction,
+            'confirmations': confirmations,
+            'htf_trend': self.determine_htf_trend(candles, 240),
+            'has_liquidity_sweep': True,
+            'has_bos': has_bos,
+            'has_choch': 'CHOCH_CONTINUATION' in confirmations,
+            'has_fib_confluence': 'FIB_79_EXT' in confirmations,
+            'asian_sweep': 'asia' in sweep_info.get('level_name', ''),
+            'order_block': None,
+            'fvg': None,
+            'htf_zone': None,
+            'sweep_info': sweep_info,
+            'smt_info': smt,
+            'fib_data': fib_data,
+            'dol_tp': dol_tp,
+        }
+
+    # ====================================================================
+    # OPTION 6: CORRECTED CONSOLIDATION OF OPTIONS 2 & 3
+    # Zone + OB/FVG + Fib 79% + Liquidity Sweep + BOS/ChoCH
+    #
+    # Fixes applied vs original Options 2/3:
+    #   - HTF zone detection: require minimum body size + mitigation check
+    #   - OB quality gate: minimum strength threshold + freshness
+    #   - FVG size filter: reject micro-gaps (< 2 pips)
+    #   - Fib 79%: proper swing detection (swing points, not raw range)
+    #   - Liquidity sweep: MANDATORY (was completely missing from Opt 2/3)
+    #   - BOS or ChoCH: at least one structural confirmation required
+    # ====================================================================
+
+    def _find_validated_htf_zones(self, candles: List[dict], timeframe: int = 240) -> List[HTFZone]:
+        """
+        IMPROVED HTF zone detection (fixes Option 2's loose zones).
+        
+        Changes vs find_htf_zones():
+        1. Candle body must be >= avg body * 1.5 (significant move)
+        2. Zone is only valid if NOT yet mitigated (price hasn't fully
+           retraced through it after creation)
+        3. Only keep the 3 most recent unmitigated zones
+        """
+        if self.mtf_data:
+            candles_htf = self.get_htf_candles(timeframe)
+        else:
+            candles_htf = self.filters.get_timeframe_data(candles, timeframe)
+
+        if len(candles_htf) < 30:
+            return []
+
+        recent = candles_htf[-30:]
+        avg_body = sum(abs(c['close'] - c['open']) for c in recent) / len(recent)
+        min_body = avg_body * 1.5  # Significant candle requirement
+
+        zones: List[HTFZone] = []
+        for i in range(len(recent) - 5):
+            candle = recent[i]
+            body = abs(candle['close'] - candle['open'])
+            if body < min_body:
+                continue  # Skip weak candles — this is the key fix
+
+            # Supply zone: strong bearish candle → next 3 candles all close below
+            if candle['close'] < candle['open']:
+                next_3 = recent[i+1:i+4]
+                if len(next_3) >= 3 and all(c['close'] < candle['low'] for c in next_3):
+                    # Mitigation check: has price come back ABOVE zone high after creation?
+                    mitigated = any(c['close'] > candle['high'] for c in recent[i+4:])
+                    if not mitigated:
+                        zones.append(HTFZone(
+                            high=candle['high'],
+                            low=candle['open'],
+                            timeframe=f"{timeframe}M",
+                            zone_type='supply'
+                        ))
+
+            # Demand zone: strong bullish candle → next 3 candles all close above
+            elif candle['close'] > candle['open']:
+                next_3 = recent[i+1:i+4]
+                if len(next_3) >= 3 and all(c['close'] > candle['high'] for c in next_3):
+                    mitigated = any(c['close'] < candle['low'] for c in recent[i+4:])
+                    if not mitigated:
+                        zones.append(HTFZone(
+                            high=candle['close'],
+                            low=candle['low'],
+                            timeframe=f"{timeframe}M",
+                            zone_type='demand'
+                        ))
+
+        return zones[-3:]  # Keep 3 most recent unmitigated zones
+
+    def _find_quality_order_blocks(self, candles: List[dict]) -> List[OrderBlock]:
+        """
+        IMPROVED OB detection (fixes Option 3's false positives).
+        
+        Changes vs find_order_blocks():
+        1. Minimum strength threshold (displacement move must be >= 2x avg body)
+        2. Freshness check — OB must not have been tested more than once
+        3. Only return top 3 OBs by strength
+        """
+        candles_5m = candles
+        if self.mtf_data:
+            candles_5m = self.get_htf_candles(5) or candles
+
+        if len(candles_5m) < 20:
+            return []
+
+        avg_body = sum(abs(c['close'] - c['open']) for c in candles_5m[-30:]) / min(30, len(candles_5m))
+        min_displacement = avg_body * 2.0  # Stricter than the 1.5x in check_bos
+
+        order_blocks: List[OrderBlock] = []
+        start_idx = max(2, len(candles_5m) - 30)
+
+        for i in range(start_idx, len(candles_5m) - 1):
+            curr = candles_5m[i]
+            next_c = candles_5m[i + 1]
+            displacement = abs(next_c['close'] - next_c['open'])
+
+            if displacement < min_displacement:
+                continue  # Weak move → not a real OB
+
+            # Bullish OB: bearish candle → strong bullish break above
+            if (curr['close'] < curr['open'] and
+                next_c['close'] > next_c['open'] and
+                next_c['close'] > curr['high']):
+
+                # Freshness: count how many times price re-entered this zone
+                tests = sum(1 for c in candles_5m[i+2:] if c['low'] <= curr['high'] and c['close'] > curr['low'])
+                if tests <= 1:  # Max 1 retest
+                    strength = displacement / avg_body
+                    order_blocks.append(OrderBlock(
+                        high=curr['high'], low=curr['low'],
+                        timestamp=curr['timestamp'], direction='bullish',
+                        timeframe='5M', strength=strength
+                    ))
+
+            # Bearish OB: bullish candle → strong bearish break below
+            elif (curr['close'] > curr['open'] and
+                  next_c['close'] < next_c['open'] and
+                  next_c['close'] < curr['low']):
+
+                tests = sum(1 for c in candles_5m[i+2:] if c['high'] >= curr['low'] and c['close'] < curr['high'])
+                if tests <= 1:
+                    strength = displacement / avg_body
+                    order_blocks.append(OrderBlock(
+                        high=curr['high'], low=curr['low'],
+                        timestamp=curr['timestamp'], direction='bearish',
+                        timeframe='5M', strength=strength
+                    ))
+
+        return sorted(order_blocks, key=lambda x: x.strength, reverse=True)[:3]
+
+    def _find_quality_fvgs(self, candles: List[dict]) -> List[FVG]:
+        """
+        IMPROVED FVG detection (fixes micro-gap false positives).
+        
+        Changes vs find_fvgs():
+        1. Minimum gap size of 2 pips (rejects noise gaps)
+        2. Only keep gaps that are still OPEN (not yet filled)
+        """
+        candles_5m = candles
+        if self.mtf_data:
+            candles_5m = self.get_htf_candles(5) or candles
+
+        if len(candles_5m) < 10:
+            return []
+
+        pip_value = self.get_pip_value()
+        min_gap = 2 * pip_value  # 2 pips minimum gap
+
+        fvgs: List[FVG] = []
+        for i in range(2, len(candles_5m)):
+            prev = candles_5m[i - 2]
+            next_c = candles_5m[i]
+
+            # Bullish FVG
+            if prev['high'] < next_c['low']:
+                gap_size = next_c['low'] - prev['high']
+                if gap_size >= min_gap:
+                    # Check if still open (not filled by subsequent candles)
+                    filled = any(c['low'] <= prev['high'] for c in candles_5m[i+1:])
+                    if not filled:
+                        fvgs.append(FVG(
+                            top=next_c['low'], bottom=prev['high'],
+                            timestamp=candles_5m[i-1]['timestamp'], direction='bullish'
+                        ))
+
+            # Bearish FVG
+            elif prev['low'] > next_c['high']:
+                gap_size = prev['low'] - next_c['high']
+                if gap_size >= min_gap:
+                    filled = any(c['high'] >= prev['low'] for c in candles_5m[i+1:])
+                    if not filled:
+                        fvgs.append(FVG(
+                            top=prev['low'], bottom=next_c['high'],
+                            timestamp=candles_5m[i-1]['timestamp'], direction='bearish'
+                        ))
+
+        return fvgs[-8:]
+
+    def _find_proper_fib_79(self, candles: List[dict], direction: str) -> Optional[float]:
+        """
+        IMPROVED 79% Fib calculation (fixes Option 3's crude swing detection).
+        
+        Instead of using raw 30-candle high/low (which catches noise), this
+        finds actual swing points using 3-bar pivot logic, then calculates
+        the 79% retracement between the most recent swing high and swing low.
+        """
+        if len(candles) < 20:
+            return None
+
+        recent = candles[-40:] if len(candles) >= 40 else candles
+
+        # Find swing highs and lows using 3-bar pivot
+        swing_highs = []
+        swing_lows = []
+        for i in range(2, len(recent) - 2):
+            if (recent[i]['high'] >= recent[i-1]['high'] and
+                recent[i]['high'] >= recent[i-2]['high'] and
+                recent[i]['high'] >= recent[i+1]['high'] and
+                recent[i]['high'] >= recent[i+2]['high']):
+                swing_highs.append(recent[i]['high'])
+
+            if (recent[i]['low'] <= recent[i-1]['low'] and
+                recent[i]['low'] <= recent[i-2]['low'] and
+                recent[i]['low'] <= recent[i+1]['low'] and
+                recent[i]['low'] <= recent[i+2]['low']):
+                swing_lows.append(recent[i]['low'])
+
+        if not swing_highs or not swing_lows:
+            return None
+
+        # Use most recent swing high and swing low
+        sh = swing_highs[-1]
+        sl = swing_lows[-1]
+
+        if sh <= sl:
+            return None
+
+        if direction == 'long':
+            # For longs: 79% retracement from high → buying in the discount
+            return sh - (sh - sl) * 0.79
+        else:
+            # For shorts: 79% retracement from low → selling in the premium
+            return sl + (sh - sl) * 0.79
+
+    def try_option_6(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+        """
+        Option 6: Zone + OB/FVG + Fib 79% + Sweep Confirmation
+        
+        CORRECTED consolidation of Options 2 & 3 — fixes every weakness:
+        
+        Required (ALL mandatory):
+        1. HTF Zone tap — price at a VALIDATED 4H/1H supply or demand zone
+        2. OB or FVG at zone — quality-filtered OB or FVG overlapping the zone
+        3. 79% Fib confluence — proper swing-based Fib within 0.5% of entry
+        4. Liquidity sweep — MUST have swept nearby liquidity (the missing piece)
+        5. BOS or ChoCH — at least one structural confirmation
+        
+        Bonus (not required):
+        - HTF trend alignment
+        - Engulfing at zone
+        - Both BOS and ChoCH
+        
+        Why this works when Opt 2/3 didn't:
+        - Option 2 had no sweep, loose zones, trivial ChoCH → 0% WR
+        - Option 3 had no sweep, bad OBs, wrong Fib swing → 20% WR
+        - This adds the sweep gate + tightens every detection algorithm
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        confirmations = []
+
+        current_price = candles[-1]['close']
+        pip_value = self.get_pip_value()
+
+        # ====== STEP 1: HTF ZONE TAP (validated zones only) ======
+        htf_zones_4h = self._find_validated_htf_zones(candles, 240)
+        htf_zones_1h = self._find_validated_htf_zones(candles, 60)
+        all_zones = htf_zones_4h + htf_zones_1h
+
+        if not all_zones:
+            self._last_rejection_reasons.append("Opt6: No validated HTF zones")
+            return None
+
+        tapped_zone = None
+        zone_buffer = 5 * pip_value  # Small buffer for zone tap
+        for zone in all_zones:
+            if (zone.low - zone_buffer) <= current_price <= (zone.high + zone_buffer):
+                tapped_zone = zone
+                break
+
+        if not tapped_zone:
+            self._last_rejection_reasons.append("Opt6: Price not at HTF zone")
+            return None
+
+        direction = 'long' if tapped_zone.zone_type == 'demand' else 'short'
+        confirmations.append(f"HTF_ZONE_{tapped_zone.timeframe}")
+
+        # ====== STEP 2: QUALITY OB OR FVG AT ZONE ======
+        quality_obs = self._find_quality_order_blocks(candles)
+        quality_fvgs = self._find_quality_fvgs(candles)
+
+        ob_tolerance = 10 * pip_value
+        entry_ob = None
+        entry_fvg = None
+
+        # Check for OB overlapping with HTF zone
+        expected_ob_dir = 'bullish' if direction == 'long' else 'bearish'
+        for ob in quality_obs:
+            if ob.direction == expected_ob_dir:
+                # OB must overlap the HTF zone AND price must be at the OB
+                ob_overlaps_zone = not (ob.high < tapped_zone.low or ob.low > tapped_zone.high)
+                price_at_ob = (ob.low - ob_tolerance) <= current_price <= (ob.high + ob_tolerance)
+                if ob_overlaps_zone and price_at_ob:
+                    entry_ob = ob
+                    confirmations.append("QUALITY_OB")
+                    break
+
+        # Check for FVG overlapping with HTF zone (if no OB found)
+        if not entry_ob:
+            expected_fvg_dir = 'bearish' if direction == 'long' else 'bullish'
+            for fvg in quality_fvgs:
+                if fvg.direction == expected_fvg_dir:
+                    fvg_overlaps_zone = not (fvg.top < tapped_zone.low or fvg.bottom > tapped_zone.high)
+                    price_at_fvg = (fvg.bottom - ob_tolerance) <= current_price <= (fvg.top + ob_tolerance)
+                    if fvg_overlaps_zone and price_at_fvg:
+                        entry_fvg = fvg
+                        confirmations.append("QUALITY_FVG")
+                        break
+
+        if not entry_ob and not entry_fvg:
+            self._last_rejection_reasons.append("Opt6: No quality OB/FVG at HTF zone")
+            return None
+
+        # ====== STEP 3: 79% FIB CONFLUENCE (proper swing-based) ======
+        fib_79_level = self._find_proper_fib_79(candles, direction)
+
+        if fib_79_level is None:
+            self._last_rejection_reasons.append("Opt6: Could not compute Fib (no clear swings)")
+            return None
+
+        fib_tolerance = 0.005  # 0.5% tolerance
+        if abs(current_price - fib_79_level) / fib_79_level > fib_tolerance:
+            self._last_rejection_reasons.append(
+                f"Opt6: Price not at 79% Fib ({current_price:.5f} vs {fib_79_level:.5f})")
+            return None
+
+        confirmations.append("FIB_79")
+
+        # ====== STEP 4: LIQUIDITY SWEEP (mandatory — the key missing piece) ======
+        has_sweep = False
+        sweep_type = None
+
+        # Try session/Asian sweep first
+        sweep_found, sweep_dir = self.check_liquidity_sweep(candles, symbol)
+        if sweep_found:
+            if (direction == 'long' and sweep_dir == 'low') or (direction == 'short' and sweep_dir == 'high'):
+                has_sweep = True
+                sweep_type = 'SESSION_SWEEP'
+
+        # Try 5M liquidity zone sweep
+        if not has_sweep:
+            liq_zone = self.find_5m_liquidity_zone(candles)
+            if liq_zone and liq_zone.get('swept'):
+                if (direction == 'long' and liq_zone['type'] == 'low') or \
+                   (direction == 'short' and liq_zone['type'] == 'high'):
+                    has_sweep = True
+                    sweep_type = '5M_LIQ_SWEEP'
+
+        if not has_sweep:
+            self._last_rejection_reasons.append("Opt6: No liquidity sweep (mandatory for this setup)")
+            return None
+
+        confirmations.append(sweep_type)
+
+        # ====== STEP 5: STRUCTURAL CONFIRMATION (BOS or ChoCH) ======
+        has_bos = self.check_bos(candles, direction)
+        has_choch = self.check_choch(candles, direction)
+
+        if has_bos:
+            confirmations.append("BOS")
+        if has_choch:
+            confirmations.append("CHOCH")
+
+        if not has_bos and not has_choch:
+            self._last_rejection_reasons.append("Opt6: No BOS or ChoCH (need structural shift)")
+            return None
+
+        # ====== STEP 6: HTF TREND ALIGNMENT (MANDATORY) ======
+        # Backtest data: 57% WR with HTF_ALIGNED vs 33% without (GBP)
+        # On EU, nearly all losses were counter-trend — this gate is critical
+        htf_trend = self.determine_htf_trend(candles, 240)
+        if not ((htf_trend == TrendDirection.BULLISH and direction == 'long') or \
+                (htf_trend == TrendDirection.BEARISH and direction == 'short')):
+            self._last_rejection_reasons.append(
+                f"Opt6: HTF trend not aligned ({htf_trend.value} vs {direction}) — mandatory filter")
+            return None
+
+        confirmations.append("HTF_ALIGNED")
+
+        # ====== BONUS CONFIRMATIONS ======
+        # Engulfing at zone (extra confidence)
+        engulfing = self.detect_engulfing(candles, timeframe=15)
+        if engulfing and engulfing['direction'] == direction:
+            confirmations.append("ENGULFING_BONUS")
+
+        _log.info(
+            f"✅ [{symbol}] Option 6 HIT: {direction} | "
+            f"Zone: {tapped_zone.zone_type} ({tapped_zone.timeframe}) | "
+            f"Confirms: {', '.join(confirmations)}"
+        )
+
+        return {
+            'setup_type': SetupType.OPTION_6,
+            'direction': direction,
+            'confirmations': confirmations,
+            'htf_trend': htf_trend if htf_trend != TrendDirection.RANGING else None,
+            'has_liquidity_sweep': True,
+            'has_bos': has_bos,
+            'has_choch': has_choch,
+            'has_fib_confluence': True,
+            'asian_sweep': sweep_type == 'SESSION_SWEEP',
+            'order_block': entry_ob,
+            'fvg': entry_fvg,
+            'htf_zone': tapped_zone,
+        }
+
     def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
         """
-        Find the liquidity sweep level (swing high/low that was swept).
-        This is where we place SL - beyond the swept level.
+        Find the NEAREST swing pivot for SL placement.
         
-        For SHORT: Find the recent swing high that was swept
-        For LONG: Find the recent swing low that was swept
+        Uses pivot detection (bar lower/higher than neighbours) to find the
+        closest structural level, NOT the absolute extreme over a wide window.
+        This keeps SL tight (8-15 pips) instead of anchoring to 20-30 candle extremes.
         
-        For HTF_LIQUIDITY_BOS setups: Use tighter structure (last 15 candles)
-        For LIQ_SWEEP_ENGULF: Include ALL recent candles (the sweep IS the recent low/high)
-        For other setups: Look back 30 candles for significant structure
+        For SHORT: Find the nearest swing high pivot above entry
+        For LONG: Find the nearest swing low pivot below entry
         """
         if len(candles) < 10:
             return None
         
-        # Lookback periods — wider lookback finds more significant structure
+        # Lookback — kept short to find NEAREST structure
         if setup_type == 'HTF_LIQUIDITY_BOS':
+            lookback = min(10, len(candles))
+        elif setup_type in ('LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
+            lookback = min(12, len(candles))
+        elif setup_type == 'ZONE_OB_FIB_SWEEP':
             lookback = min(15, len(candles))
-        elif setup_type == 'LIQ_SWEEP_ENGULF':
-            lookback = min(20, len(candles))
         else:
-            lookback = min(30, len(candles))  # OB_FVG_FIB, HTF_ZONE_OB_CHOCH: wider lookback
+            lookback = min(15, len(candles))
         
         recent = candles[-lookback:]
         
-        if setup_type == 'LIQ_SWEEP_ENGULF':
-            # For sweep+engulfing: the swept level IS the most recent extreme
-            if direction == 'short':
-                return max(c['high'] for c in recent)
-            else:
-                return min(c['low'] for c in recent)
+        # --- Pivot-based swing detection ---
+        # A swing low pivot: bar whose low is lower than both neighbours
+        # A swing high pivot: bar whose high is higher than both neighbours
+        # We scan from MOST RECENT backward and return the NEAREST one
         
-        if direction == 'short':
-            # Find the highest swing high in recent candles (exclude last 3)
-            swing_high = max(c['high'] for c in recent[:-3])
-            return swing_high
+        if direction == 'long':
+            # Find nearest swing low pivot (scan backward, skip last 2 bars)
+            for i in range(len(recent) - 3, 0, -1):
+                if recent[i]['low'] <= recent[i-1]['low'] and recent[i]['low'] <= recent[i+1]['low']:
+                    return recent[i]['low']
+            # Fallback: lowest of last 10 candles (not full lookback)
+            return min(c['low'] for c in recent[-10:])
         else:
-            # Find the lowest swing low in recent candles (exclude last 3)
-            swing_low = min(c['low'] for c in recent[:-3])
-            return swing_low
+            # Find nearest swing high pivot (scan backward, skip last 2 bars)
+            for i in range(len(recent) - 3, 0, -1):
+                if recent[i]['high'] >= recent[i-1]['high'] and recent[i]['high'] >= recent[i+1]['high']:
+                    return recent[i]['high']
+            # Fallback: highest of last 10 candles (not full lookback)
+            return max(c['high'] for c in recent[-10:])
     
     def calculate_sl_tp(self, entry: float, setup_data: Dict, candles: List[dict], 
                         symbol: str) -> Tuple[Optional[float], Optional[float], float]:
@@ -1334,13 +2579,13 @@ class FlexibleICTStrategy:
                 sweep_level = min(c['low'] for c in recent) if is_long else max(c['high'] for c in recent)
         
         # Apply buffer beyond the sweep level
-        # Gold: $5-10 buffer (Gold is volatile, needs room), Forex: 3-5 pips buffer
+        # Gold: $3-5 buffer, Forex: 2-3 pips buffer (tight — pivot is already the structure)
         if is_gold:
-            buffer = 5.00 if setup_type == 'HTF_LIQUIDITY_BOS' else 10.00  # $5-10 buffer for Gold
+            buffer = 3.00 if setup_type == 'HTF_LIQUIDITY_BOS' else 5.00
         elif setup_type == 'HTF_LIQUIDITY_BOS':
-            buffer = 3 * pip_value  # 3 pips buffer for high-confidence forex
+            buffer = 2 * pip_value  # 2 pips buffer for high-confidence forex
         else:
-            buffer = 5 * pip_value  # 5 pips buffer for standard forex
+            buffer = 2 * pip_value  # 2 pips buffer (pivot-based SL is already precise)
         
         if is_long:
             stop_loss = sweep_level - buffer  # SL below the swept low
@@ -1362,32 +2607,33 @@ class FlexibleICTStrategy:
         sl_points = sl_distance / point_value
         
         # === ATR-based dynamic minimum SL ===
-        # SL must be at least 2x the average 5M candle range to avoid noise
+        # SL must be at least 1.5x the average 5M candle range to avoid noise
         recent_ranges = [c['high'] - c['low'] for c in candles[-20:]]
         avg_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else 0
-        atr_min_sl = (avg_range * 2.0) / point_value  # 2x ATR in points
+        atr_min_sl = (avg_range * 1.5) / point_value  # 1.5x ATR in points
         
         # Max SL limits - different for Gold vs Forex
-        # Gold at $5000 needs $15-50 SL (0.3%-1% of price) to avoid noise
         if is_gold:
             if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS
+                max_sl_points = 2000   # $20 max for HTF_LIQUIDITY_BOS
+                min_sl_points = 1000   # $10 min
+            else:
+                max_sl_points = 3500   # $35 max for other setups
                 min_sl_points = 1500   # $15 min
-            else:
-                max_sl_points = 5000   # $50 max for other setups
-                min_sl_points = 2000   # $20 min
         else:
-            # Forex: SL range depends on setup type
-            # Previous 5 pip minimums were within single candle noise!
+            # Forex: Tighter SL = better R:R, pivot-based placement is precise
             if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 200  # 20 pips max for HTF_LIQUIDITY_BOS
-                min_sl_points = 80   # 8 pips min for HTF_LIQUIDITY_BOS
-            elif setup_type == 'LIQ_SWEEP_ENGULF':
-                max_sl_points = 250  # 25 pips max for sweep+engulfing
-                min_sl_points = 100  # 10 pips min
+                max_sl_points = 120  # 12 pips max for HTF_LIQUIDITY_BOS
+                min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+            elif setup_type in ('LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
+                max_sl_points = 150  # 15 pips max for sweep-based setups
+                min_sl_points = 70   # 7 pips min
+            elif setup_type == 'ZONE_OB_FIB_SWEEP':
+                max_sl_points = 170  # 17 pips max for Option 6
+                min_sl_points = 70   # 7 pips min
             else:
-                max_sl_points = 300  # 30 pips max for other setups (OB_FVG_FIB, HTF_ZONE_OB_CHOCH)
-                min_sl_points = 100  # 10 pips min
+                max_sl_points = 170  # 17 pips max for OB_FVG_FIB, HTF_ZONE_OB_CHOCH
+                min_sl_points = 70   # 7 pips min
         
         # Use the LARGER of static minimum or ATR-based minimum
         effective_min = max(min_sl_points, atr_min_sl)
@@ -1416,12 +2662,26 @@ class FlexibleICTStrategy:
         
         # Calculate TP - Gold uses 1:1.5 RR (higher win rate), Forex uses 1:2
         # Gold is more volatile, tighter TP = higher probability of hitting
+        # Option 5 (ICT_SWEEP_CONFIRM) uses DOL-based TP when available
         if is_gold:
             rr_multiplier = 1.5  # 1:1.5 for Gold
         else:
             rr_multiplier = 2.0  # 1:2 for Forex
         
-        if direction == 'long':
+        # Check if setup_data has DOL TP (Option 5)
+        dol_tp = setup_data.get('dol_tp')
+        if dol_tp and setup_type == 'ICT_SWEEP_CONFIRM':
+            # Use DOL-based TP but ensure minimum 1.5 R:R
+            dol_distance = abs(dol_tp - entry)
+            if dol_distance >= sl_distance * 1.5:
+                take_profit = dol_tp
+            else:
+                # DOL target too close, use standard R:R
+                if direction == 'long':
+                    take_profit = entry + (sl_distance * rr_multiplier)
+                else:
+                    take_profit = entry - (sl_distance * rr_multiplier)
+        elif direction == 'long':
             take_profit = entry + (sl_distance * rr_multiplier)
         else:
             take_profit = entry - (sl_distance * rr_multiplier)
@@ -1546,23 +2806,45 @@ class FlexibleICTStrategy:
             return None
         
         # Determine priority based on symbol
-        # Only use PROVEN setups per pair (based on journal data):
-        #   HTF_LIQUIDITY_BOS: 50% WR — solid on EU/GU
-        #   LIQ_SWEEP_ENGULF: 100% WR — your manual setup style
-        #   OB_FVG_FIB: 0% on GU, 20% overall — DISABLED for forex (bad OB/FVG detection)
-        #   HTF_ZONE_OB_CHOCH: 0% WR — DISABLED everywhere
+        # Pair-specific priority (waterfall — first match wins):
+        #   EURUSD: Option 4 (100% WR) → Option 1 (50% WR) → Option 5 (testing) → Option 6 (corrected Opt 2+3)
+        #   GBPUSD: Option 5 (full ICT) → Option 6 (57% WR, 2.15 PF) → Option 1 (50% WR) → Option 4 (100% WR)
+        #   Gold:   Option 1 → Option 4 → Option 5 → Option 6
+        #
+        # Legacy Options 2 & 3 are REPLACED by Option 6 (corrected consolidation).
+        # Original try_option_2/try_option_3 methods kept for reference but NOT called.
         if 'XAU' in symbol:
-            # Gold: only HTF_LIQUIDITY_BOS (others were 0% WR)
-            options = [
-                self.try_option_1,
-                lambda c, s=symbol: self.try_option_4(c, s),
-            ]
-        else:  # EU, GU - only proven setups
+            # Gold: HTF bias works best for trend continuation
             options = [
                 self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
                 lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF (100% WR)
-                # self.try_option_2,                                  # HTF_ZONE_OB_CHOCH — DISABLED (0% WR)
-                # self.try_option_3,                                  # OB_FVG_FIB — DISABLED (20% WR, wrong OB/FVG)
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM (full ICT)
+                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (corrected Opt 2+3)
+            ]
+        elif 'GBP' in symbol:
+            # GBP pairs: Option 5 first (full ICT, rare but high quality),
+            # then Option 6 (57% WR, 2.15 PF — best confirmed backtest on GBP),
+            # then Options 1 & 4 as fallback
+            options = [
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — PRIORITY for GBP
+                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (57% WR, 2.15 PF on GBP)
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF (100% WR)
+                # --- LEGACY (replaced by Option 6) ---
+                # lambda c, s=symbol: self.try_option_2(c, s),        # HTF_ZONE_OB_CHOCH — 0% WR (fixed in Opt 6)
+                # lambda c: self.try_option_3(c),                     # OB_FVG_FIB — 20% WR (fixed in Opt 6)
+            ]
+        else:
+            # EURUSD (and other forex): Option 4 prioritized — simple,
+            # 100% WR, catches the classic Asian sweep → London engulfing
+            options = [
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — PRIORITY for EU
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM (full ICT)
+                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (corrected Opt 2+3)
+                # --- LEGACY (replaced by Option 6) ---
+                # lambda c, s=symbol: self.try_option_2(c, s),        # HTF_ZONE_OB_CHOCH — 0% WR (fixed in Opt 6)
+                # lambda c: self.try_option_3(c),                     # OB_FVG_FIB — 20% WR (fixed in Opt 6)
             ]
         
         setup_data = None

@@ -6,7 +6,7 @@ Tests the strategy on historical data and validates win rate >= 60%
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import yfinance as yf
 from datetime import datetime, timedelta

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from enum import Enum
 from datetime import datetime, timezone
-from core.advanced_filters import AdvancedFilters
+from core.legacy.advanced_filters import AdvancedFilters
 
 
 class TrendDirection(Enum):

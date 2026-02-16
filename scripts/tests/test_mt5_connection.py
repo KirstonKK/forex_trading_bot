@@ -21,7 +21,7 @@ import os
 import sys
 import logging
 from connectors.mt5_connector import MT5Connector
-from core.smc_strategy import SMCStrategy
+from core.legacy.smc_strategy import SMCStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
 
 logging.basicConfig(level=logging.INFO)

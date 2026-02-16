@@ -7,11 +7,11 @@ import sys
 import os
 from datetime import datetime
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
 from backtesting.data_fetcher import DataFetcher
-from core.professional_strategy import ProfessionalStrategy
+from core.legacy.professional_strategy import ProfessionalStrategy
 
 
 def main():

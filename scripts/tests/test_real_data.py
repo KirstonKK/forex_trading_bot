@@ -5,10 +5,10 @@ Uses free Yahoo Finance data to test strategy with real prices.
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from connectors.free_data_connector import FreeDataConnector
-from core.enhanced_smc_strategy import EnhancedSMCStrategy
+from core.legacy.enhanced_smc_strategy import EnhancedSMCStrategy
 from core.enhanced_risk_manager import EnhancedRiskManager
 import logging
 

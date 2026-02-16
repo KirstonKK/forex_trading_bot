@@ -5,7 +5,7 @@ Uses yfinance for real market data simulation
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import logging
 from datetime import datetime, timedelta
@@ -240,7 +240,7 @@ def test_simulation(login: int = None, password: str = None, server: str = None)
     print("\n" + "="*60)
     
     # Import bot components
-    from core.smc_strategy import SMCStrategy
+    from core.legacy.smc_strategy import SMCStrategy
     from core.enhanced_risk_manager import EnhancedRiskManager
     
     # Create simulated connector
