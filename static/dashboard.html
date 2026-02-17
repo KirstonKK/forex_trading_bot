@@ -579,10 +579,13 @@
                     style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 10px;">
                     📊 Overall Performance</div>
                 <div id="overallPerformance" style="font-size: 12px;">
-                    <div style="margin-bottom: 5px;">Trades: <span id="perfTrades">0</span></div>
+                    <div style="margin-bottom: 5px;">Trades: <span id="perfTrades">0</span> <span
+                            style="color: var(--text-secondary); font-size: 10px;">(<span id="perfActive">0</span>
+                            active)</span></div>
                     <div style="margin-bottom: 5px;">Wins: <span id="perfWins"
                             style="color: var(--accent-green);">0</span> | Losses: <span id="perfLosses"
                             style="color: var(--accent-red);">0</span></div>
+                    <div style="margin-bottom: 5px;">Win Rate: <span id="perfWinRate">--</span></div>
                     <div style="margin-bottom: 5px;">Profit Factor: <span id="perfProfitFactor">--</span></div>
                     <div>Avg Win: <span id="perfAvgWin" style="color: var(--accent-green);">--</span> | Avg Loss: <span
                             id="perfAvgLoss" style="color: var(--accent-red);">--</span></div>
@@ -609,6 +612,18 @@
                 <div id="newsEvents" style="font-size: 11px;">
                     <div style="color: var(--text-secondary);">Loading...</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- Recent Trades Row -->
+        <div
+            style="margin-bottom: 20px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 2px; padding: 15px;">
+            <div
+                style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-secondary); margin-bottom: 10px;">
+                📜 Recent Trade Results</div>
+            <div id="recentTrades" style="font-size: 12px;">
+                <div style="color: var(--text-secondary);">No resolved trades yet — signals auto-close when price hits
+                    TP or SL</div>
             </div>
         </div>
 
@@ -780,8 +795,8 @@
                 // Update signals panel with pending signals from server
                 updateSignalsPanel(signalsData.signals, historyData.pending || []);
 
-                // Update stats - show pending signal count
-                document.getElementById('signalsToday').textContent = historyData.pending_count || 0;
+                // Update stats - show signals detected today (all statuses)
+                document.getElementById('signalsToday').textContent = historyData.today_count || 0;
 
                 // Update stats
                 let dataPointsCount = 0;
@@ -854,7 +869,6 @@
                         <div>No signals detected. Monitoring for ICT/SMC setups...</div>
                     </div>
                 `;
-                document.getElementById('signalsToday').textContent = '0';
                 return;
             }
 
@@ -874,13 +888,28 @@
                     <div>No signals detected. Monitoring for ICT/SMC setups...</div>
                 </div>
             `;
-
-            document.getElementById('signalsToday').textContent = allSignals.length;
         }
 
         function renderSignalCard(pair, signal, timeStr, isPending) {
-            const statusLabel = isPending ? '🟡 PENDING' : (signal.status === 'executed' ? '✅ EXECUTED' : '⚪ CANCELLED');
-            const cardStyle = isPending ? 'border-left: 3px solid var(--accent-yellow);' : 'opacity: 0.6;';
+            const status = signal.status || 'pending';
+            let statusLabel, cardStyle;
+
+            if (status === 'pending') {
+                statusLabel = '🟡 PENDING';
+                cardStyle = 'border-left: 3px solid var(--accent-yellow);';
+            } else if (status === 'win') {
+                statusLabel = `✅ TP HIT  +${(signal.pips_result || 0).toFixed(1)} pips`;
+                cardStyle = 'border-left: 3px solid var(--accent-green); background: rgba(0, 204, 102, 0.04);';
+            } else if (status === 'loss') {
+                statusLabel = `❌ SL HIT  ${(signal.pips_result || 0).toFixed(1)} pips`;
+                cardStyle = 'border-left: 3px solid var(--accent-red); background: rgba(255, 51, 102, 0.04);';
+            } else if (status === 'executed') {
+                statusLabel = '✅ EXECUTED';
+                cardStyle = 'opacity: 0.6;';
+            } else {
+                statusLabel = '⚪ CANCELLED';
+                cardStyle = 'opacity: 0.4;';
+            }
             const signalId = signal.id || '';
 
             // Price note for futures (Gold)
@@ -890,7 +919,7 @@
                 </div>
             ` : '';
 
-            const actionButtons = isPending && signalId ? `
+            const actionButtons = (status === 'pending') && signalId ? `
                 <div style="display: flex; gap: 8px; margin-top: 10px;">
                     <button onclick="executeSignal('${signalId}')" style="flex: 1; padding: 8px; background: var(--accent-green); color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 11px;">
                         ✅ EXECUTED
@@ -1000,14 +1029,47 @@
 
                 // Update overall performance
                 document.getElementById('perfTrades').textContent = overall.total_trades || 0;
+                document.getElementById('perfActive').textContent = overall.active_trades || 0;
                 document.getElementById('perfWins').textContent = overall.wins || 0;
                 document.getElementById('perfLosses').textContent = overall.losses || 0;
+                document.getElementById('perfWinRate').textContent =
+                    overall.win_rate ? overall.win_rate.toFixed(1) + '%' : '--';
                 document.getElementById('perfProfitFactor').textContent =
                     overall.profit_factor ? overall.profit_factor.toFixed(2) : '--';
                 document.getElementById('perfAvgWin').textContent =
                     overall.avg_win ? '+' + overall.avg_win.toFixed(1) + ' pips' : '--';
                 document.getElementById('perfAvgLoss').textContent =
                     overall.avg_loss ? '-' + Math.abs(overall.avg_loss).toFixed(1) + ' pips' : '--';
+
+                // Update recent trades
+                const tradesContainer = document.getElementById('recentTrades');
+                const recentTrades = data.recent_trades || [];
+                if (recentTrades.length > 0) {
+                    let tradesHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px;">';
+                    recentTrades.slice(0, 10).forEach(t => {
+                        const isWin = t.status === 'win';
+                        const emoji = isWin ? '✅' : '❌';
+                        const color = isWin ? 'var(--accent-green)' : 'var(--accent-red)';
+                        const pips = t.pips_result ? t.pips_result.toFixed(1) : '0';
+                        const rr = t.rr_achieved ? t.rr_achieved.toFixed(1) : '0';
+                        const exitTime = t.exit_time ? new Date(t.exit_time).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+                        tradesHtml += `
+                            <div style="background: var(--bg-tertiary); padding: 8px 12px; border-radius: 2px; border-left: 3px solid ${color}; font-size: 11px;">
+                                <div style="display: flex; justify-content: space-between; margin-bottom: 3px;">
+                                    <span style="font-weight: 600;">${emoji} ${t.symbol || ''}</span>
+                                    <span style="color: ${color}; font-weight: 600;">${isWin ? '+' : ''}${pips} pips</span>
+                                </div>
+                                <div style="color: var(--text-secondary);">
+                                    ${t.setup_type || ''} | ${(t.direction || '').toUpperCase()} | RR: ${rr} | ${exitTime}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    tradesHtml += '</div>';
+                    tradesContainer.innerHTML = tradesHtml;
+                } else {
+                    tradesContainer.innerHTML = '<div style="color: var(--text-secondary);">No resolved trades yet — signals auto-close when price hits TP or SL</div>';
+                }
 
                 // Update by pair performance
                 const pairContainer = document.getElementById('pairPerformance');

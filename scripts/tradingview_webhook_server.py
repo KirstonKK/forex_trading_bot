@@ -228,10 +228,16 @@ def load_signals():
         active_signals = {}
 
 def prune_old_signals():
-    """Remove signals older than 7 days to prevent unbounded growth."""
+    """
+    Clean up old signals:
+    - Pending signals older than 24 hours → mark 'expired' (setups go stale)
+    - Anything older than 30 days → remove entirely to prevent unbounded growth
+    """
     global active_signals
     now = datetime.now(timezone.utc)
+    to_expire = []
     to_remove = []
+    
     for sig_id, sig in active_signals.items():
         try:
             sig_time = sig.get('detected_at') or sig.get('timestamp')
@@ -244,15 +250,37 @@ def prune_old_signals():
             # Make timezone-aware if not already
             if sig_dt.tzinfo is None:
                 sig_dt = sig_dt.replace(tzinfo=timezone.utc)
-            if (now - sig_dt).days > 7:
+            
+            age_hours = (now - sig_dt).total_seconds() / 3600
+            
+            # Pending signals > 24h → expired (setup is stale, market has moved)
+            if sig.get('status') == 'pending' and age_hours > 24:
+                to_expire.append(sig_id)
+            # Anything > 30 days → remove from disk entirely
+            elif (now - sig_dt).days > 30:
                 to_remove.append(sig_id)
         except Exception:
             pass
+    
+    for sig_id in to_expire:
+        active_signals[sig_id]['status'] = 'expired'
+        active_signals[sig_id]['expired_at'] = now.isoformat()
+        # Also remove from trade tracker if present
+        if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+            tracker = get_trade_tracker()
+            if sig_id in tracker.active_trades:
+                del tracker.active_trades[sig_id]
+                tracker._save_active_trades()
+    
     for sig_id in to_remove:
         del active_signals[sig_id]
-    if to_remove:
+    
+    if to_expire or to_remove:
         save_signals()
-        logger.info(f"Pruned {len(to_remove)} old signals (>7 days)")
+    if to_expire:
+        logger.info(f"⏰ Expired {len(to_expire)} stale pending signals (>24h old)")
+    if to_remove:
+        logger.info(f"🗑️ Pruned {len(to_remove)} old signals (>30 days)")
 
 # Store market data in memory
 market_data = {}
@@ -264,6 +292,17 @@ signal_counter = 0
 # Load persisted data on startup
 load_market_data()
 load_signals()
+
+# Sync any existing pending signals into TradeTracker for TP/SL monitoring
+if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+    tracker = get_trade_tracker()
+    synced = 0
+    for sig_id, sig in active_signals.items():
+        if sig.get('status') == 'pending' and sig.get('entry_price') and sig.get('stop_loss') and sig.get('take_profit'):
+            tracker.add_trade(sig, sig.get('symbol', ''), signal_id=sig_id)
+            synced += 1
+    if synced:
+        logger.info(f"📊 Synced {synced} pending signals to TradeTracker for auto-resolution")
 
 def add_signal_to_history(signal, symbol):
     """Add a signal that persists until executed or cancelled."""
@@ -477,6 +516,62 @@ def webhook():
         if total_candles % 10 == 0:
             save_market_data()
         
+        # ── AUTO-RESOLVE: Check if any pending signals hit TP or SL ──
+        current_price = float(data.get('close', 0))
+        if current_price > 0 and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+            try:
+                tracker = get_trade_tracker()
+                resolved = tracker.update_trades(symbol, current_price)
+                
+                for trade in resolved:
+                    # Sync back to active_signals dict
+                    sig_id = trade.get('signal_id', '')
+                    if sig_id in active_signals:
+                        outcome = trade['status']  # 'win' or 'loss'
+                        active_signals[sig_id]['status'] = outcome
+                        active_signals[sig_id]['exit_price'] = trade.get('exit_price')
+                        active_signals[sig_id]['exit_time'] = trade.get('exit_time')
+                        active_signals[sig_id]['pips_result'] = trade.get('pips_result')
+                        active_signals[sig_id]['rr_achieved'] = trade.get('rr_achieved')
+                        save_signals()
+                    
+                    # Log + Telegram notification
+                    pips = trade.get('pips_result', 0)
+                    rr = trade.get('rr_achieved', 0)
+                    direction = trade.get('direction', '?')
+                    setup = trade.get('setup_type', '?')
+                    entry = trade.get('entry_price', 0)
+                    exit_p = trade.get('exit_price', 0)
+                    
+                    if outcome == 'win':
+                        emoji = "✅"
+                        msg = f"🎯 TP HIT — +{pips:.1f} pips (RR {rr:.1f})"
+                    else:
+                        emoji = "❌"
+                        msg = f"🛑 SL HIT — {pips:.1f} pips"
+                    
+                    tg_text = (
+                        f"{emoji} <b>TRADE {outcome.upper()}: {symbol}</b>\n"
+                        f"Setup: {setup} | {direction.upper()}\n"
+                        f"Entry: {entry:.5f} → Exit: {exit_p:.5f}\n"
+                        f"{msg}"
+                    )
+                    
+                    logger.info(f"{emoji} RESOLVED: {sig_id} | {msg}")
+                    
+                    if telegram_notifier:
+                        try:
+                            telegram_notifier.send_message(tg_text)
+                        except Exception as e:
+                            logger.error(f"Telegram notify error: {e}")
+                    if telegram_group_notifier:
+                        try:
+                            telegram_group_notifier.send_message(tg_text)
+                        except Exception as e:
+                            logger.error(f"Telegram group notify error: {e}")
+            except Exception as e:
+                logger.error(f"Auto-resolve error: {e}")
+        
         # Check if we have enough data to analyze (need all 4 timeframes)
         if (len(market_data[symbol].get('4H', {}).get('close', [])) >= 50 and
             len(market_data[symbol].get('1H', {}).get('close', [])) >= 50 and
@@ -585,7 +680,15 @@ def webhook():
                 signal['entry'] = signal['entry_price']
                 
                 # Store signal in history for dashboard
-                add_signal_to_history(signal, symbol)
+                new_signal_id = add_signal_to_history(signal, symbol)
+                
+                # ── Register with TradeTracker for automatic TP/SL monitoring ──
+                if new_signal_id and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+                    try:
+                        tracker = get_trade_tracker()
+                        tracker.add_trade(signal, symbol, signal_id=new_signal_id)
+                    except Exception as e:
+                        logger.error(f"TradeTracker registration error: {e}")
                 
                 # Record signal for daily report
                 if REPORT_TRACKER_AVAILABLE and get_report_tracker:
@@ -769,9 +872,19 @@ def get_signal_history():
     """Get all signals (pending and executed) for dashboard."""
     pending = get_pending_signals()
     all_signals = list(active_signals.values())
+    
+    # Count signals detected TODAY (any status: pending, win, loss, cancelled)
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    today_count = 0
+    for sig in all_signals:
+        detected = sig.get('detected_at', '')
+        if detected and detected[:10] == today_str:
+            today_count += 1
+    
     return jsonify({
         'status': 'success',
         'pending_count': len(pending),
+        'today_count': today_count,
         'total_count': len(all_signals),
         'pending': pending,
         'all': all_signals
@@ -908,10 +1021,21 @@ def get_performance():
         try:
             tracker = get_trade_tracker()
             stats = tracker.get_performance_stats()
-            result['overall'] = stats.get('overall', {})
+            # get_performance_stats() returns flat dict with total_trades, wins, etc.
+            result['overall'] = {
+                'total_trades': stats.get('total_trades', 0),
+                'wins': stats.get('wins', 0),
+                'losses': stats.get('losses', 0),
+                'win_rate': stats.get('win_rate', 0.0),
+                'total_pips': stats.get('total_pips', 0.0),
+                'avg_win': stats.get('avg_win', 0.0),
+                'avg_loss': stats.get('avg_loss', 0.0),
+                'profit_factor': stats.get('profit_factor', 0.0),
+                'active_trades': tracker.get_active_count(),
+            }
             result['by_pair'] = stats.get('by_pair', {})
-            result['recent_trades'] = stats.get('recent_trades', [])
-            result['equity_curve'] = stats.get('equity_curve', [])
+            result['by_setup'] = stats.get('by_setup', {})
+            result['recent_trades'] = tracker.history[-10:][::-1]  # Last 10, newest first
         except Exception as e:
             logger.error(f"Trade tracker error: {e}")
             result['overall'] = {'error': str(e)}

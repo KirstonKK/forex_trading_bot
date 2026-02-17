@@ -1,13 +1,14 @@
 """
 Trade Performance Tracker
 Monitors actual signal performance and calculates real win rates.
+Automatically resolves signals when price hits TP or SL.
 """
 
 import json
 import logging
 from datetime import datetime, date
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,17 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / 'data'
 TRADES_FILE = DATA_DIR / 'active_trades.json'
 HISTORY_FILE = DATA_DIR / 'trade_history.json'
+
+
+def _calculate_pips(price_diff: float, symbol: str) -> float:
+    """
+    Calculate pips from a price difference.
+    Forex pairs: 1 pip = 0.0001 (10,000 multiplier)
+    Gold (XAU):  1 pip = 0.10   (10 multiplier)
+    """
+    if 'XAU' in symbol or 'GOLD' in symbol:
+        return price_diff * 10  # Gold: $0.10 = 1 pip
+    return price_diff * 10000   # Forex: 0.0001 = 1 pip
 
 
 @dataclass
@@ -84,28 +96,47 @@ class TradeTracker:
         except Exception as e:
             logger.error(f"Error saving history: {e}")
     
-    def add_trade(self, signal: Dict[str, Any], symbol: str):
-        """Add a new trade to track."""
-        signal_id = f"{symbol}_{signal['timestamp']}"
+    def add_trade(self, signal: Dict[str, Any], symbol: str, signal_id: str = None):
+        """
+        Add a new trade to track.
+        
+        Args:
+            signal: Signal dict from strategy.analyze()
+            symbol: e.g. 'EUR_USD'
+            signal_id: Key from active_signals dict (used to sync resolution)
+        """
+        trade_id = signal_id or f"{symbol}_{signal.get('timestamp', int(datetime.now().timestamp()))}"
+        
+        # Don't double-register
+        if trade_id in self.active_trades:
+            logger.debug(f"Trade {trade_id} already tracked, skipping")
+            return trade_id
         
         trade = Trade(
-            signal_id=signal_id,
+            signal_id=trade_id,
             symbol=symbol,
-            direction=signal['direction'],
-            entry_price=signal['entry_price'],
-            stop_loss=signal['stop_loss'],
-            take_profit=signal['take_profit'],
-            entry_time=datetime.fromtimestamp(signal['timestamp']).isoformat(),
+            direction=signal.get('direction', 'long'),
+            entry_price=signal.get('entry_price', 0),
+            stop_loss=signal.get('stop_loss', 0),
+            take_profit=signal.get('take_profit', 0),
+            entry_time=datetime.fromtimestamp(signal.get('timestamp', datetime.now().timestamp())).isoformat(),
             setup_type=signal.get('setup_type', 'UNKNOWN'),
             confidence=signal.get('confidence', 0.0)
         )
         
-        self.active_trades[signal_id] = trade
+        self.active_trades[trade_id] = trade
         self._save_active_trades()
-        logger.info(f"📊 Tracking new trade: {signal_id}")
+        logger.info(f"📊 Tracking new trade: {trade_id} | {trade.direction} {symbol} @ {trade.entry_price:.5f} | SL={trade.stop_loss:.5f} TP={trade.take_profit:.5f}")
+        return trade_id
     
-    def update_trades(self, symbol: str, current_price: float):
-        """Check if any active trades hit TP or SL."""
+    def update_trades(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
+        """
+        Check if any active trades for this symbol hit TP or SL.
+        
+        Returns:
+            List of resolved trade dicts (for notifications/status sync).
+        """
+        resolved = []
         to_remove = []
         
         for signal_id, trade in self.active_trades.items():
@@ -116,10 +147,10 @@ class TradeTracker:
             hit_tp = False
             hit_sl = False
             
-            if trade.direction == 'long':
+            if trade.direction in ('long', 'buy'):
                 hit_tp = current_price >= trade.take_profit
                 hit_sl = current_price <= trade.stop_loss
-            else:  # short
+            else:  # short / sell
                 hit_tp = current_price <= trade.take_profit
                 hit_sl = current_price >= trade.stop_loss
             
@@ -128,33 +159,35 @@ class TradeTracker:
                 trade.exit_price = trade.take_profit
                 trade.exit_time = datetime.now().isoformat()
                 
-                # Calculate pips
-                if trade.direction == 'long':
-                    trade.pips_result = (trade.take_profit - trade.entry_price) * 10000
+                # Calculate pips using symbol-aware function
+                if trade.direction in ('long', 'buy'):
+                    trade.pips_result = _calculate_pips(trade.take_profit - trade.entry_price, symbol)
                 else:
-                    trade.pips_result = (trade.entry_price - trade.take_profit) * 10000
+                    trade.pips_result = _calculate_pips(trade.entry_price - trade.take_profit, symbol)
                 
-                sl_distance = abs(trade.entry_price - trade.stop_loss) * 10000
+                sl_distance = _calculate_pips(abs(trade.entry_price - trade.stop_loss), symbol)
                 trade.rr_achieved = trade.pips_result / sl_distance if sl_distance > 0 else 0
                 
-                logger.info(f"✅ Trade WIN: {signal_id} | +{trade.pips_result:.1f} pips | RR: {trade.rr_achieved:.2f}")
+                logger.info(f"✅ TP HIT — {signal_id} | +{trade.pips_result:.1f} pips | RR: {trade.rr_achieved:.2f}")
                 to_remove.append(signal_id)
+                resolved.append(asdict(trade))
                 
             elif hit_sl:
                 trade.status = 'loss'
                 trade.exit_price = trade.stop_loss
                 trade.exit_time = datetime.now().isoformat()
                 
-                # Calculate pips (negative)
-                if trade.direction == 'long':
-                    trade.pips_result = (trade.stop_loss - trade.entry_price) * 10000
+                # Calculate pips (negative for losses)
+                if trade.direction in ('long', 'buy'):
+                    trade.pips_result = _calculate_pips(trade.stop_loss - trade.entry_price, symbol)
                 else:
-                    trade.pips_result = (trade.entry_price - trade.stop_loss) * 10000
+                    trade.pips_result = -_calculate_pips(trade.stop_loss - trade.entry_price, symbol)
                 
                 trade.rr_achieved = -1.0  # Lost 1R
                 
-                logger.info(f"❌ Trade LOSS: {signal_id} | {trade.pips_result:.1f} pips")
+                logger.info(f"❌ SL HIT — {signal_id} | {trade.pips_result:.1f} pips")
                 to_remove.append(signal_id)
+                resolved.append(asdict(trade))
         
         # Move completed trades to history
         for signal_id in to_remove:
@@ -164,6 +197,12 @@ class TradeTracker:
         if to_remove:
             self._save_active_trades()
             self._save_history()
+        
+        return resolved
+    
+    def get_active_count(self) -> int:
+        """Number of trades currently being monitored."""
+        return sum(1 for t in self.active_trades.values() if t.status == 'active')
     
     def get_performance_stats(self, days: int = 30) -> Dict[str, Any]:
         """Get performance statistics."""
