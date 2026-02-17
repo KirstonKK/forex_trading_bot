@@ -293,16 +293,63 @@ signal_counter = 0
 load_market_data()
 load_signals()
 
-# Sync any existing pending signals into TradeTracker for TP/SL monitoring
+# Sync RECENT pending signals into TradeTracker for TP/SL monitoring.
+# Only sync signals < 4 hours old. The verifier will fetch real price
+# history from yfinance and immediately resolve any that already hit SL/TP.
+# Signals older than 4h are too stale — expire them instead.
 if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
     tracker = get_trade_tracker()
     synced = 0
-    for sig_id, sig in active_signals.items():
-        if sig.get('status') == 'pending' and sig.get('entry_price') and sig.get('stop_loss') and sig.get('take_profit'):
-            tracker.add_trade(sig, sig.get('symbol', ''), signal_id=sig_id)
+    verified_resolved = 0
+    expired = 0
+    skipped = 0
+    now_ts = datetime.now(timezone.utc)
+    for sig_id, sig in list(active_signals.items()):
+        if sig.get('status') != 'pending':
+            continue
+        if not (sig.get('entry_price') and sig.get('stop_loss') and sig.get('take_profit')):
+            continue
+        # Check signal age
+        detected = sig.get('detected_at', '')
+        try:
+            if isinstance(detected, str) and detected:
+                sig_dt = datetime.fromisoformat(detected.replace('Z', '+00:00'))
+                if sig_dt.tzinfo is None:
+                    sig_dt = sig_dt.replace(tzinfo=timezone.utc)
+                age_minutes = (now_ts - sig_dt).total_seconds() / 60
+                if age_minutes > 240:  # > 4 hours
+                    active_signals[sig_id]['status'] = 'expired'
+                    expired += 1
+                    continue
+        except Exception:
+            skipped += 1
+            continue
+        
+        # add_trade now verifies against real price history
+        trade_id, resolution = tracker.add_trade(sig, sig.get('symbol', ''), signal_id=sig_id)
+        
+        if resolution:
+            # Trade was already resolved via yfinance verification
+            outcome = resolution['status']
+            active_signals[sig_id]['status'] = outcome
+            active_signals[sig_id]['exit_price'] = resolution.get('exit_price')
+            active_signals[sig_id]['exit_time'] = resolution.get('exit_time')
+            active_signals[sig_id]['pips_result'] = resolution.get('pips_result')
+            active_signals[sig_id]['rr_achieved'] = resolution.get('rr_achieved')
+            verified_resolved += 1
+        else:
             synced += 1
+    
     if synced:
-        logger.info(f"📊 Synced {synced} pending signals to TradeTracker for auto-resolution")
+        logger.info(f"📊 Synced {synced} pending signals to TradeTracker (verified still active)")
+    if verified_resolved:
+        logger.info(f"🔍 Verified & resolved {verified_resolved} signals on startup (SL/TP already hit)")
+    if expired:
+        logger.info(f"⏰ Expired {expired} signals older than 4 hours")
+    if skipped:
+        logger.info(f"⏭️ Skipped {skipped} signals (bad timestamp)")
+    if verified_resolved or expired:
+        save_signals()
 
 def add_signal_to_history(signal, symbol):
     """Add a signal that persists until executed or cancelled."""
@@ -517,11 +564,17 @@ def webhook():
             save_market_data()
         
         # ── AUTO-RESOLVE: Check if any pending signals hit TP or SL ──
-        current_price = float(data.get('close', 0))
-        if current_price > 0 and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
+        # The tracker now does TWO-LAYER verification:
+        # 1. Quick check with incoming candle high/low
+        # 2. Full yfinance history walk when quick check finds a hit OR every ~30 min
+        # No trade is EVER resolved without yfinance verification.
+        candle_high = float(data.get('high', 0))
+        candle_low = float(data.get('low', 0))
+        candle_close = float(data.get('close', 0))
+        if candle_close > 0 and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
             try:
                 tracker = get_trade_tracker()
-                resolved = tracker.update_trades(symbol, current_price)
+                resolved = tracker.update_trades(symbol, candle_close, candle_high=candle_high, candle_low=candle_low)
                 
                 for trade in resolved:
                     # Sync back to active_signals dict
@@ -542,6 +595,9 @@ def webhook():
                     setup = trade.get('setup_type', '?')
                     entry = trade.get('entry_price', 0)
                     exit_p = trade.get('exit_price', 0)
+                    verified = trade.get('verified', False)
+                    hit_time = trade.get('hit_candle_time', '')
+                    candles_checked = trade.get('candles_checked', 0)
                     
                     if outcome == 'win':
                         emoji = "✅"
@@ -550,14 +606,19 @@ def webhook():
                         emoji = "❌"
                         msg = f"🛑 SL HIT — {pips:.1f} pips"
                     
+                    verify_tag = "🔍 VERIFIED" if verified else "⚠️ UNVERIFIED"
+                    
                     tg_text = (
                         f"{emoji} <b>TRADE {outcome.upper()}: {symbol}</b>\n"
                         f"Setup: {setup} | {direction.upper()}\n"
                         f"Entry: {entry:.5f} → Exit: {exit_p:.5f}\n"
-                        f"{msg}"
+                        f"{msg}\n"
+                        f"{verify_tag} against {candles_checked} candles"
                     )
+                    if hit_time:
+                        tg_text += f"\nHit candle: {hit_time}"
                     
-                    logger.info(f"{emoji} RESOLVED: {sig_id} | {msg}")
+                    logger.info(f"{emoji} RESOLVED ({verify_tag}): {sig_id} | {msg}")
                     
                     if telegram_notifier:
                         try:
@@ -683,10 +744,13 @@ def webhook():
                 new_signal_id = add_signal_to_history(signal, symbol)
                 
                 # ── Register with TradeTracker for automatic TP/SL monitoring ──
+                # Brand-new signals: skip_verification=True (signal is < 1 candle old,
+                # no history to verify yet — verification kicks in on subsequent updates)
                 if new_signal_id and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
                     try:
                         tracker = get_trade_tracker()
-                        tracker.add_trade(signal, symbol, signal_id=new_signal_id)
+                        _tid, _res = tracker.add_trade(signal, symbol, signal_id=new_signal_id,
+                                                       skip_verification=True)
                     except Exception as e:
                         logger.error(f"TradeTracker registration error: {e}")
                 

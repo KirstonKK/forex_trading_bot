@@ -2,11 +2,16 @@
 Trade Performance Tracker
 Monitors actual signal performance and calculates real win rates.
 Automatically resolves signals when price hits TP or SL.
+
+CRITICAL: All trade resolutions are VERIFIED against real yfinance price
+history. We never trust a single candle — we fetch the full history from
+signal detection time to now and walk through candles chronologically to
+determine what was hit first.
 """
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
@@ -16,6 +21,30 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent.parent / 'data'
 TRADES_FILE = DATA_DIR / 'active_trades.json'
 HISTORY_FILE = DATA_DIR / 'trade_history.json'
+
+# yfinance ticker mapping (CME futures)
+YFINANCE_TICKER_MAP = {
+    'EUR_USD': '6E=F',
+    'GBP_USD': '6B=F',
+    'XAU_USD': 'GC=F',
+    'EURUSD': '6E=F',
+    'GBPUSD': '6B=F',
+    'XAUUSD': 'GC=F',
+}
+
+# Cache yfinance import
+_yf = None
+
+def _get_yfinance():
+    """Lazy-load yfinance to avoid import cost on every candle."""
+    global _yf
+    if _yf is None:
+        try:
+            import yfinance as yf
+            _yf = yf
+        except ImportError:
+            logger.error("yfinance not installed — price verification disabled")
+    return _yf
 
 
 def _calculate_pips(price_diff: float, symbol: str) -> float:
@@ -27,6 +56,167 @@ def _calculate_pips(price_diff: float, symbol: str) -> float:
     if 'XAU' in symbol or 'GOLD' in symbol:
         return price_diff * 10  # Gold: $0.10 = 1 pip
     return price_diff * 10000   # Forex: 0.0001 = 1 pip
+
+
+def fetch_price_history(symbol: str, start_time: datetime, end_time: datetime = None,
+                        interval: str = '5m') -> Optional[Any]:
+    """
+    Fetch real price candles from yfinance between start_time and end_time.
+    
+    Returns a DataFrame with columns: Open, High, Low, Close (or None on failure).
+    """
+    yf = _get_yfinance()
+    if yf is None:
+        return None
+    
+    ticker_symbol = YFINANCE_TICKER_MAP.get(symbol)
+    if not ticker_symbol:
+        logger.warning(f"No yfinance ticker for {symbol}")
+        return None
+    
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+    
+    # Ensure timezone-aware
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    
+    # yfinance 5m data limited to ~60 days
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        # Add buffer: start 1 candle before signal, end 1 candle after now
+        fetch_start = start_time - timedelta(minutes=10)
+        fetch_end = end_time + timedelta(minutes=10)
+        
+        df = ticker.history(start=fetch_start, end=fetch_end, interval=interval)
+        
+        if df is None or df.empty:
+            logger.warning(f"No price data returned for {ticker_symbol} ({start_time} → {end_time})")
+            return None
+        
+        # Filter to only candles AFTER signal entry time
+        if df.index.tzinfo is None:
+            df.index = df.index.tz_localize('UTC')
+        else:
+            df.index = df.index.tz_convert('UTC')
+        
+        df = df[df.index >= start_time]
+        
+        if df.empty:
+            logger.warning(f"No candles after signal time {start_time} for {ticker_symbol}")
+            return None
+        
+        logger.info(f"📈 Fetched {len(df)} candles for {symbol} ({start_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')} UTC)")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch price history for {symbol}: {e}")
+        return None
+
+
+def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[Dict[str, Any]]:
+    """
+    THE CRITICAL VERIFICATION FUNCTION.
+    
+    Fetches real price data from signal detection time to now,
+    walks through candles chronologically, and determines what
+    was hit FIRST — SL or TP.
+    
+    Args:
+        trade_or_dict: Trade dataclass or signal dict
+        symbol: Override symbol (used when passing raw signal dict)
+    
+    Returns:
+        None if no resolution found (trade still active), or dict:
+        {
+            'outcome': 'win' | 'loss',
+            'exit_price': float,
+            'exit_time': str (ISO),
+            'hit_candle_time': str (ISO),
+            'candles_checked': int,
+            'verified': True
+        }
+    """
+    # Extract trade parameters
+    if isinstance(trade_or_dict, Trade):
+        sym = trade_or_dict.symbol
+        direction = trade_or_dict.direction
+        entry_price = trade_or_dict.entry_price
+        stop_loss = trade_or_dict.stop_loss
+        take_profit = trade_or_dict.take_profit
+        entry_time_str = trade_or_dict.entry_time
+    else:
+        sym = symbol or trade_or_dict.get('symbol', '')
+        direction = trade_or_dict.get('direction', 'long')
+        entry_price = trade_or_dict.get('entry_price', trade_or_dict.get('entry', 0))
+        stop_loss = trade_or_dict.get('stop_loss', 0)
+        take_profit = trade_or_dict.get('take_profit', 0)
+        entry_time_str = trade_or_dict.get('entry_time', trade_or_dict.get('detected_at', ''))
+    
+    if not all([sym, entry_price, stop_loss, take_profit, entry_time_str]):
+        logger.warning(f"Incomplete trade data for verification: {sym}")
+        return None
+    
+    # Parse entry time
+    try:
+        if isinstance(entry_time_str, str):
+            entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+        else:
+            entry_dt = entry_time_str
+        if entry_dt.tzinfo is None:
+            entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+    except Exception as e:
+        logger.error(f"Failed to parse entry time '{entry_time_str}': {e}")
+        return None
+    
+    # Fetch price history
+    df = fetch_price_history(sym, entry_dt)
+    if df is None:
+        logger.warning(f"Cannot verify {sym} — no price history available")
+        return None
+    
+    # Walk through candles chronologically
+    candles_checked = 0
+    for candle_time, row in df.iterrows():
+        candles_checked += 1
+        high = row['High']
+        low = row['Low']
+        
+        hit_tp = False
+        hit_sl = False
+        
+        if direction in ('long', 'buy'):
+            hit_tp = high >= take_profit
+            hit_sl = low <= stop_loss
+        else:  # short / sell
+            hit_tp = low <= take_profit
+            hit_sl = high >= stop_loss
+        
+        # Same candle: SL takes priority (conservative)
+        if hit_sl:
+            return {
+                'outcome': 'loss',
+                'exit_price': stop_loss,
+                'exit_time': candle_time.isoformat(),
+                'hit_candle_time': candle_time.isoformat(),
+                'candles_checked': candles_checked,
+                'verified': True,
+            }
+        elif hit_tp:
+            return {
+                'outcome': 'win',
+                'exit_price': take_profit,
+                'exit_time': candle_time.isoformat(),
+                'hit_candle_time': candle_time.isoformat(),
+                'candles_checked': candles_checked,
+                'verified': True,
+            }
+    
+    # Neither TP nor SL hit yet
+    logger.debug(f"Verified {candles_checked} candles for {sym} — trade still active")
+    return None
 
 
 @dataclass
@@ -96,21 +286,31 @@ class TradeTracker:
         except Exception as e:
             logger.error(f"Error saving history: {e}")
     
-    def add_trade(self, signal: Dict[str, Any], symbol: str, signal_id: str = None):
+    def add_trade(self, signal: Dict[str, Any], symbol: str, signal_id: str = None,
+                  skip_verification: bool = False) -> Tuple[str, Optional[Dict]]:
         """
         Add a new trade to track.
+        
+        On registration, immediately verifies against real price history.
+        If SL/TP was already hit (e.g. stale signal on restart), resolves
+        it instantly with verified data — never trusts a blind comparison.
         
         Args:
             signal: Signal dict from strategy.analyze()
             symbol: e.g. 'EUR_USD'
             signal_id: Key from active_signals dict (used to sync resolution)
+            skip_verification: If True, skip yfinance check (for brand-new signals < 1 candle old)
+        
+        Returns:
+            (trade_id, resolution_dict_or_None)
+            - resolution_dict is set if the trade was immediately resolved via verification
         """
         trade_id = signal_id or f"{symbol}_{signal.get('timestamp', int(datetime.now().timestamp()))}"
         
         # Don't double-register
         if trade_id in self.active_trades:
             logger.debug(f"Trade {trade_id} already tracked, skipping")
-            return trade_id
+            return trade_id, None
         
         trade = Trade(
             signal_id=trade_id,
@@ -124,18 +324,82 @@ class TradeTracker:
             confidence=signal.get('confidence', 0.0)
         )
         
+        logger.info(f"📊 Tracking new trade: {trade_id} | {trade.direction} {symbol} @ {trade.entry_price:.5f} | SL={trade.stop_loss:.5f} TP={trade.take_profit:.5f}")
+        
+        # ── IMMEDIATE VERIFICATION ──
+        # For signals that are more than 1 candle old (e.g. startup sync),
+        # verify against real price history BEFORE accepting as active.
+        if not skip_verification:
+            verification = verify_trade_against_history(trade)
+            if verification and verification.get('verified'):
+                outcome = verification['outcome']
+                trade.status = outcome
+                trade.exit_price = verification['exit_price']
+                trade.exit_time = verification['exit_time']
+                
+                if trade.direction in ('long', 'buy'):
+                    if outcome == 'win':
+                        trade.pips_result = _calculate_pips(trade.take_profit - trade.entry_price, symbol)
+                    else:
+                        trade.pips_result = _calculate_pips(trade.stop_loss - trade.entry_price, symbol)
+                else:
+                    if outcome == 'win':
+                        trade.pips_result = _calculate_pips(trade.entry_price - trade.take_profit, symbol)
+                    else:
+                        trade.pips_result = -_calculate_pips(trade.stop_loss - trade.entry_price, symbol)
+                
+                sl_distance = _calculate_pips(abs(trade.entry_price - trade.stop_loss), symbol)
+                trade.rr_achieved = (trade.pips_result / sl_distance) if sl_distance > 0 else 0
+                
+                # Straight to history — never sits as "active"
+                self.history.append(asdict(trade))
+                self._save_history()
+                
+                candles = verification.get('candles_checked', '?')
+                hit_time = verification.get('hit_candle_time', '?')
+                icon = "✅" if outcome == 'win' else "❌"
+                logger.info(
+                    f"{icon} VERIFIED {outcome.upper()} on registration — {trade_id} | "
+                    f"{trade.pips_result:.1f} pips | Hit at {hit_time} | "
+                    f"Checked {candles} candles"
+                )
+                
+                return trade_id, {**asdict(trade), 'verified': True}
+        
+        # No hit found yet — trade is genuinely active
         self.active_trades[trade_id] = trade
         self._save_active_trades()
-        logger.info(f"📊 Tracking new trade: {trade_id} | {trade.direction} {symbol} @ {trade.entry_price:.5f} | SL={trade.stop_loss:.5f} TP={trade.take_profit:.5f}")
-        return trade_id
+        return trade_id, None
     
-    def update_trades(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
+    def update_trades(self, symbol: str, current_price: float,
+                       candle_high: float = None, candle_low: float = None,
+                       force_verify: bool = False) -> List[Dict[str, Any]]:
         """
         Check if any active trades for this symbol hit TP or SL.
+        
+        TWO-LAYER RESOLUTION:
+        1. Quick check: uses the incoming candle high/low (fast, every 5 min)
+        2. Full verification: fetches yfinance history and walks chronologically
+           - Triggered every 6th candle (~30 min) OR when quick check finds a hit
+           - This catches gaps the poller missed
+        
+        A trade is NEVER resolved without yfinance verification.
+        
+        Args:
+            symbol: e.g. 'EUR_USD'
+            current_price: Candle close price
+            candle_high: Candle high (if None, uses current_price)
+            candle_low: Candle low (if None, uses current_price)
+            force_verify: If True, always do full yfinance verification
         
         Returns:
             List of resolved trade dicts (for notifications/status sync).
         """
+        if candle_high is None:
+            candle_high = current_price
+        if candle_low is None:
+            candle_low = current_price
+        
         resolved = []
         to_remove = []
         
@@ -143,51 +407,74 @@ class TradeTracker:
             if trade.symbol != symbol or trade.status != 'active':
                 continue
             
-            # Check if TP or SL hit
+            # ── QUICK CHECK: Does the current candle touch TP/SL? ──
             hit_tp = False
             hit_sl = False
             
             if trade.direction in ('long', 'buy'):
-                hit_tp = current_price >= trade.take_profit
-                hit_sl = current_price <= trade.stop_loss
+                hit_tp = candle_high >= trade.take_profit
+                hit_sl = candle_low <= trade.stop_loss
             else:  # short / sell
-                hit_tp = current_price <= trade.take_profit
-                hit_sl = current_price >= trade.stop_loss
+                hit_tp = candle_low <= trade.take_profit
+                hit_sl = candle_high >= trade.stop_loss
             
-            if hit_tp:
-                trade.status = 'win'
-                trade.exit_price = trade.take_profit
-                trade.exit_time = datetime.now().isoformat()
+            quick_hit = hit_tp or hit_sl
+            
+            # ── PERIODIC FULL VERIFICATION ──
+            # Track how many candles since last full verify
+            if not hasattr(trade, '_verify_counter'):
+                trade._verify_counter = 0
+            trade._verify_counter = getattr(trade, '_verify_counter', 0) + 1
+            
+            # Full verify every 6 candles (~30 min) or when quick check found a hit
+            needs_full_verify = quick_hit or force_verify or (trade._verify_counter >= 6)
+            
+            if needs_full_verify:
+                trade._verify_counter = 0  # Reset counter
                 
-                # Calculate pips using symbol-aware function
-                if trade.direction in ('long', 'buy'):
-                    trade.pips_result = _calculate_pips(trade.take_profit - trade.entry_price, symbol)
-                else:
-                    trade.pips_result = _calculate_pips(trade.entry_price - trade.take_profit, symbol)
+                verification = verify_trade_against_history(trade)
                 
-                sl_distance = _calculate_pips(abs(trade.entry_price - trade.stop_loss), symbol)
-                trade.rr_achieved = trade.pips_result / sl_distance if sl_distance > 0 else 0
-                
-                logger.info(f"✅ TP HIT — {signal_id} | +{trade.pips_result:.1f} pips | RR: {trade.rr_achieved:.2f}")
-                to_remove.append(signal_id)
-                resolved.append(asdict(trade))
-                
-            elif hit_sl:
-                trade.status = 'loss'
-                trade.exit_price = trade.stop_loss
-                trade.exit_time = datetime.now().isoformat()
-                
-                # Calculate pips (negative for losses)
-                if trade.direction in ('long', 'buy'):
-                    trade.pips_result = _calculate_pips(trade.stop_loss - trade.entry_price, symbol)
-                else:
-                    trade.pips_result = -_calculate_pips(trade.stop_loss - trade.entry_price, symbol)
-                
-                trade.rr_achieved = -1.0  # Lost 1R
-                
-                logger.info(f"❌ SL HIT — {signal_id} | {trade.pips_result:.1f} pips")
-                to_remove.append(signal_id)
-                resolved.append(asdict(trade))
+                if verification and verification.get('verified'):
+                    outcome = verification['outcome']
+                    trade.status = outcome
+                    trade.exit_price = verification['exit_price']
+                    trade.exit_time = verification['exit_time']
+                    
+                    # Calculate pips
+                    if trade.direction in ('long', 'buy'):
+                        if outcome == 'win':
+                            trade.pips_result = _calculate_pips(trade.take_profit - trade.entry_price, symbol)
+                        else:
+                            trade.pips_result = _calculate_pips(trade.stop_loss - trade.entry_price, symbol)
+                    else:
+                        if outcome == 'win':
+                            trade.pips_result = _calculate_pips(trade.entry_price - trade.take_profit, symbol)
+                        else:
+                            trade.pips_result = -_calculate_pips(trade.stop_loss - trade.entry_price, symbol)
+                    
+                    sl_distance = _calculate_pips(abs(trade.entry_price - trade.stop_loss), symbol)
+                    trade.rr_achieved = (trade.pips_result / sl_distance) if sl_distance > 0 else 0
+                    
+                    candles = verification.get('candles_checked', '?')
+                    hit_time = verification.get('hit_candle_time', '?')
+                    icon = "✅" if outcome == 'win' else "❌"
+                    logger.info(
+                        f"{icon} VERIFIED {outcome.upper()} — {signal_id} | "
+                        f"{trade.pips_result:.1f} pips | Hit at {hit_time} | "
+                        f"Checked {candles} candles of history"
+                    )
+                    
+                    to_remove.append(signal_id)
+                    resolved.append({**asdict(trade), 'verified': True})
+                    
+                elif quick_hit and verification is None:
+                    # Quick check said hit, but yfinance returned no data
+                    # DON'T resolve — we can't verify it
+                    logger.warning(
+                        f"⚠️ Quick check found {'TP' if hit_tp else 'SL'} hit for {signal_id} "
+                        f"but yfinance verification returned no data — NOT resolving (will retry)"
+                    )
+                # else: verification returned None (no hit found in history) — trade stays active
         
         # Move completed trades to history
         for signal_id in to_remove:
