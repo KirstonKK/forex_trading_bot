@@ -156,8 +156,10 @@ class FlexibleICTStrategy:
             'newyork': {'start': 13, 'end': 17, 'min_confidence': 0.80}
         }
         
-        # Fixed R:R - DO NOT CHANGE (60% win rate achieved with 1:2)
-        self.target_rr = 2.0  # 1:2 R:R - backtested
+        # Dynamic R:R — DOL-based targeting with floors:
+        #   Forex floor: 1:2 (backtested 60% WR), Gold floor: 1:1.5
+        #   No ceiling — DOL confluence determines actual TP
+        self.target_rr = 2.0  # Minimum floor for forex (used as reference)
     
     def _load_state(self):
         """Load signal cooldown and trade state from disk (survives restarts)."""
@@ -1761,82 +1763,186 @@ class FlexibleICTStrategy:
     def find_draws_on_liquidity(self, candles_5m: List[dict], candles_1h: List[dict],
                                  direction: str, symbol: str) -> Optional[float]:
         """
-        Find the nearest draw on liquidity in our trade direction for TP.
-        
-        Draws on liquidity (targets price is attracted to):
-        - Previous session high/low
-        - Equal highs/lows
-        - Unfilled FVGs
-        - Previous day high/low
-        
-        Returns: TP price level or None (falls back to R:R based TP)
+        Legacy wrapper — returns nearest DOL target (for Option 5 backward compat).
+        Now calls the enhanced find_dol_targets() under the hood.
         """
-        pip_value = self.get_pip_value(symbol)
-        current_price = candles_5m[-1]['close']
-        candidates = []
+        targets = self.find_dol_targets(candles_5m, candles_1h, direction, symbol)
+        if not targets:
+            return None
+        # Return the nearest target (first one, sorted by distance)
+        return targets[0]['price']
 
-        # 1. Session levels as targets
+    def find_dol_targets(self, candles_5m: List[dict], candles_1h: List[dict],
+                          direction: str, symbol: str,
+                          entry_price: float = None, sl_distance: float = None) -> List[Dict]:
+        """
+        Find ALL draws on liquidity targets scored by confluence.
+        
+        Each target gets a confluence score based on how many independent
+        sources confirm it as a liquidity magnet. Higher score = higher
+        probability that price will reach it.
+        
+        Sources (each contributes +1 to score):
+          1. Session levels (prev_asia, prev_london, prev_ny H/L)
+          2. Equal highs/lows (liquidity pools from 1H candles)
+          3. Unfilled FVGs (price tends to fill gaps)
+          4. 4H swing levels (major structure)
+          5. Previous day high/low (institutional reference)
+        
+        Targets within merge_tolerance are merged (scores combined).
+        
+        Returns: List of {'price': float, 'score': int, 'sources': [str], 'rr': float}
+                 Sorted by score DESC, then by distance ASC.
+                 Empty list if no DOL found.
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        pip_value = self.get_pip_value(symbol)
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        current_price = entry_price or candles_5m[-1]['close']
+        min_dist = 5 * pip_value  # Minimum distance to consider a target
+        merge_tolerance = 5 * pip_value if not is_gold else 5.0  # Merge targets within 5 pips / $5
+        
+        # Raw candidates: (price, source_name)
+        raw = []
+
+        # --- SOURCE 1: Session levels ---
         sess = self._session_levels.get(symbol, {})
         for sess_name in ['prev_asia', 'prev_london', 'prev_ny', 'asia', 'london', 'ny']:
             s = sess.get(sess_name)
             if not s:
                 continue
-            if direction == 'long' and s['high'] > current_price + 5 * pip_value:
-                candidates.append(s['high'])
-            elif direction == 'short' and s['low'] < current_price - 5 * pip_value:
-                candidates.append(s['low'])
+            if direction == 'long' and s['high'] > current_price + min_dist:
+                raw.append((s['high'], f'session_{sess_name}_high'))
+            elif direction == 'short' and s['low'] < current_price - min_dist:
+                raw.append((s['low'], f'session_{sess_name}_low'))
 
-        # 2. Equal highs/lows (liquidity pools)
+        # --- SOURCE 2: Equal highs/lows (1H liquidity pools) ---
         if len(candles_1h) >= 20:
             eq_tolerance = 3 * pip_value
             highs = [c['high'] for c in candles_1h[-20:]]
             lows = [c['low'] for c in candles_1h[-20:]]
 
-            # Find equal highs
+            # Equal highs
+            seen_eq_h = set()
             for i in range(len(highs)):
+                if i in seen_eq_h:
+                    continue
                 cluster = [highs[i]]
+                indices = [i]
                 for j in range(i + 1, len(highs)):
                     if abs(highs[j] - highs[i]) < eq_tolerance:
                         cluster.append(highs[j])
+                        indices.append(j)
                 if len(cluster) >= 2:
+                    seen_eq_h.update(indices)
                     avg = sum(cluster) / len(cluster)
-                    if direction == 'long' and avg > current_price + 5 * pip_value:
-                        candidates.append(avg)
-                    elif direction == 'short' and avg < current_price - 5 * pip_value:
-                        candidates.append(avg)
+                    touch_count = len(cluster)
+                    if direction == 'long' and avg > current_price + min_dist:
+                        # More touches = stronger pool, add extra entries for scoring
+                        raw.append((avg, f'equal_highs_{touch_count}x'))
+                        if touch_count >= 3:
+                            raw.append((avg, 'equal_highs_strong'))  # Bonus for 3+ touches
 
-            # Find equal lows
+            # Equal lows
+            seen_eq_l = set()
             for i in range(len(lows)):
+                if i in seen_eq_l:
+                    continue
                 cluster = [lows[i]]
+                indices = [i]
                 for j in range(i + 1, len(lows)):
                     if abs(lows[j] - lows[i]) < eq_tolerance:
                         cluster.append(lows[j])
+                        indices.append(j)
                 if len(cluster) >= 2:
+                    seen_eq_l.update(indices)
                     avg = sum(cluster) / len(cluster)
-                    if direction == 'long' and avg > current_price + 5 * pip_value:
-                        candidates.append(avg)
-                    elif direction == 'short' and avg < current_price - 5 * pip_value:
-                        candidates.append(avg)
+                    touch_count = len(cluster)
+                    if direction == 'short' and avg < current_price - min_dist:
+                        raw.append((avg, f'equal_lows_{touch_count}x'))
+                        if touch_count >= 3:
+                            raw.append((avg, 'equal_lows_strong'))
 
-        # 3. Unfilled FVGs (price tends to fill them)
+        # --- SOURCE 3: Unfilled FVGs ---
         fvgs = self.find_fvgs(candles_5m)
         for fvg in fvgs:
             mid = (fvg.top + fvg.bottom) / 2
-            if direction == 'long' and fvg.direction == 'bearish' and mid > current_price + 5 * pip_value:
-                candidates.append(mid)
-            elif direction == 'short' and fvg.direction == 'bullish' and mid < current_price - 5 * pip_value:
-                candidates.append(mid)
+            if direction == 'long' and fvg.direction == 'bearish' and mid > current_price + min_dist:
+                raw.append((mid, 'unfilled_fvg'))
+            elif direction == 'short' and fvg.direction == 'bullish' and mid < current_price - min_dist:
+                raw.append((mid, 'unfilled_fvg'))
 
-        if not candidates:
-            return None
+        # --- SOURCE 4: 4H swing levels (major structure) ---
+        candles_4h = self.mtf_data.get('4H', []) if self.mtf_data else []
+        if len(candles_4h) >= 10:
+            swing_4h = self._find_swing_levels(candles_4h, lookback=min(20, len(candles_4h)))
+            for lvl in swing_4h:
+                if direction == 'long' and lvl['side'] == 'high' and lvl['level'] > current_price + min_dist:
+                    raw.append((lvl['level'], '4h_swing_high'))
+                elif direction == 'short' and lvl['side'] == 'low' and lvl['level'] < current_price - min_dist:
+                    raw.append((lvl['level'], '4h_swing_low'))
 
-        # Return the NEAREST DOL target
-        if direction == 'long':
-            candidates.sort()
-            return candidates[0]  # Closest above
-        else:
-            candidates.sort(reverse=True)
-            return candidates[0]  # Closest below
+        # --- SOURCE 5: Previous day high/low ---
+        if len(candles_1h) >= 24:
+            # Use last 24 1H candles as proxy for previous day range
+            prev_day_candles = candles_1h[-48:-24] if len(candles_1h) >= 48 else candles_1h[:24]
+            if prev_day_candles:
+                prev_day_high = max(c['high'] for c in prev_day_candles)
+                prev_day_low = min(c['low'] for c in prev_day_candles)
+                if direction == 'long' and prev_day_high > current_price + min_dist:
+                    raw.append((prev_day_high, 'prev_day_high'))
+                elif direction == 'short' and prev_day_low < current_price - min_dist:
+                    raw.append((prev_day_low, 'prev_day_low'))
+
+        if not raw:
+            return []
+
+        # --- MERGE nearby targets and compute confluence scores ---
+        # Sort by price
+        raw.sort(key=lambda x: x[0])
+        
+        merged = []  # List of {'price': float, 'score': int, 'sources': [str]}
+        
+        for price, source in raw:
+            # Check if this target is close to an existing merged target
+            found = False
+            for m in merged:
+                if abs(m['price'] - price) <= merge_tolerance:
+                    # Merge: average the price, add the source
+                    n = len(m['sources'])
+                    m['price'] = (m['price'] * n + price) / (n + 1)  # Weighted average
+                    m['sources'].append(source)
+                    m['score'] += 1
+                    found = True
+                    break
+            if not found:
+                merged.append({
+                    'price': price,
+                    'score': 1,
+                    'sources': [source],
+                })
+        
+        # --- Calculate RR for each target ---
+        for t in merged:
+            if sl_distance and sl_distance > 0:
+                tp_distance = abs(t['price'] - current_price)
+                t['rr'] = round(tp_distance / sl_distance, 1)
+            else:
+                t['rr'] = 0.0
+        
+        # --- Sort: score DESC, then distance ASC (nearest high-score first) ---
+        merged.sort(key=lambda t: (-t['score'], abs(t['price'] - current_price)))
+        
+        _log.info(
+            f"🎯 [{symbol}] DOL targets ({direction}): "
+            + ", ".join(
+                f"{t['price']:.5f} (score={t['score']}, RR={t['rr']}, src={'+'.join(t['sources'][:3])})"
+                for t in merged[:5]
+            )
+        )
+        
+        return merged
 
     # --- Option 5: Full ICT Sweep → Confirm → Continue → Entry → DOL ---
 
@@ -2549,11 +2655,20 @@ class FlexibleICTStrategy:
         """
         Calculate SL/TP based on ICT principles:
         - SL: Beyond the liquidity sweep level (swing high/low that was swept)
-        - TP: 2x the risk (1:2 RR)
+        - TP: Dynamic DOL-based targeting (all options), with floor of 1:2 forex / 1:1.5 gold
+        
+        DOL targets scored by confluence:
+          - Session levels, equal H/L, unfilled FVGs, 4H swings, prev day H/L
+          - Tier 1 (score>=3): Aim far (maximize RR)
+          - Tier 2 (score==2): Moderate distance (balance)
+          - Tier 3 (score==1): Nearest only (conservative)
+          - No ceiling — 1:7+ is valid if the pool is strong
         
         HTF_LIQUIDITY_BOS gets tighter SL due to high confidence (95%)
         Gold uses different pip/point values than forex pairs.
         """
+        import logging
+        _log = logging.getLogger('strategy')
         direction = setup_data['direction']
         pip_value = self.get_pip_value(symbol)
         point_value = self.get_point_value(symbol)
@@ -2660,31 +2775,104 @@ class FlexibleICTStrategy:
             sl_distance = max_sl_distance
             sl_points = max_sl_points
         
-        # Calculate TP - Gold uses 1:1.5 RR (higher win rate), Forex uses 1:2
-        # Gold is more volatile, tighter TP = higher probability of hitting
-        # Option 5 (ICT_SWEEP_CONFIRM) uses DOL-based TP when available
-        if is_gold:
-            rr_multiplier = 1.5  # 1:1.5 for Gold
-        else:
-            rr_multiplier = 2.0  # 1:2 for Forex
+        # ================================================================
+        # DYNAMIC TP: DOL-based targeting for ALL options
+        # 
+        # Strategy:
+        #   1. Find all DOL targets scored by confluence
+        #   2. Pick the BEST target (highest score) that meets minimum RR
+        #   3. If multiple targets have same score, pick nearest (safer)
+        #   4. Fall back to fixed RR floor if no DOL found
+        #
+        # Minimum floors (never worse than these):
+        #   Gold:  1:1.5 RR
+        #   Forex: 1:2.0 RR
+        # No ceiling — if a strong liquidity pool is at 1:7 or beyond, take it
+        # ================================================================
         
-        # Check if setup_data has DOL TP (Option 5)
-        dol_tp = setup_data.get('dol_tp')
-        if dol_tp and setup_type == 'ICT_SWEEP_CONFIRM':
-            # Use DOL-based TP but ensure minimum 1.5 R:R
-            dol_distance = abs(dol_tp - entry)
-            if dol_distance >= sl_distance * 1.5:
-                take_profit = dol_tp
-            else:
-                # DOL target too close, use standard R:R
-                if direction == 'long':
-                    take_profit = entry + (sl_distance * rr_multiplier)
-                else:
-                    take_profit = entry - (sl_distance * rr_multiplier)
-        elif direction == 'long':
-            take_profit = entry + (sl_distance * rr_multiplier)
+        # Minimum RR floors
+        if is_gold:
+            min_rr_floor = 1.5   # Gold floor
         else:
-            take_profit = entry - (sl_distance * rr_multiplier)
+            min_rr_floor = 2.0   # Forex floor
+        
+        # Get 5M and 1H candles for DOL search
+        candles_5m = self.mtf_data.get('5M', candles) if self.mtf_data else candles
+        candles_1h = self.mtf_data.get('1H', []) if self.mtf_data else []
+        
+        # Find all DOL targets with confluence scores
+        dol_targets = self.find_dol_targets(
+            candles_5m, candles_1h, direction, symbol,
+            entry_price=entry, sl_distance=sl_distance
+        )
+        
+        take_profit = None
+        chosen_target = None
+        
+        if dol_targets:
+            # Filter targets that meet minimum RR floor
+            min_tp_distance = sl_distance * min_rr_floor
+            
+            valid_targets = []
+            for t in dol_targets:
+                tp_dist = abs(t['price'] - entry)
+                if tp_dist >= min_tp_distance:
+                    t['rr'] = round(tp_dist / sl_distance, 1)
+                    valid_targets.append(t)
+            
+            if valid_targets:
+                # TIERED SELECTION with RR caps per tier:
+                # Higher confluence = we trust the target more = allow higher RR
+                # Lower confluence = cap the RR to avoid unreachable TPs
+                #
+                # Tier 1 (score >= 4): Extreme confluence — no RR cap
+                # Tier 2 (score == 3): Strong — cap at 1:8 
+                # Tier 3 (score == 2): Moderate — cap at 1:5
+                # Tier 4 (score == 1): Weak — cap at 1:3
+                
+                tier_caps = {1: 3.0, 2: 5.0, 3: 8.0}  # score → max RR
+                
+                # Apply RR caps to each target based on score
+                capped_targets = []
+                for t in valid_targets:
+                    max_rr = tier_caps.get(t['score'], 999.0)  # No cap for score >= 4
+                    if t['rr'] <= max_rr:
+                        capped_targets.append(t)
+                    else:
+                        # Cap the TP price to max_rr distance
+                        capped_dist = sl_distance * max_rr
+                        capped_t = dict(t)
+                        if direction == 'long':
+                            capped_t['price'] = entry + capped_dist
+                        else:
+                            capped_t['price'] = entry - capped_dist
+                        capped_t['rr'] = max_rr
+                        capped_t['sources'] = t['sources'] + [f'capped_from_{t["rr"]}']
+                        capped_targets.append(capped_t)
+                
+                if capped_targets:
+                    # Sort: score DESC, then nearest first (safest high-quality target)
+                    capped_targets.sort(key=lambda t: (-t['score'], abs(t['price'] - entry)))
+                    chosen_target = capped_targets[0]
+                
+                if chosen_target:
+                    take_profit = chosen_target['price']
+                    _log.info(
+                        f"🎯 [{symbol}] Dynamic TP: {take_profit:.5f} "
+                        f"(RR 1:{chosen_target['rr']}, score={chosen_target['score']}, "
+                        f"sources={'+'.join(chosen_target['sources'][:4])})"
+                    )
+        
+        # Fallback: No DOL target found or all below floor → use fixed RR floor
+        if take_profit is None:
+            if direction == 'long':
+                take_profit = entry + (sl_distance * min_rr_floor)
+            else:
+                take_profit = entry - (sl_distance * min_rr_floor)
+            _log.info(
+                f"📐 [{symbol}] Fixed TP fallback: {take_profit:.5f} "
+                f"(RR 1:{min_rr_floor}, no qualifying DOL targets)"
+            )
         
         # Final sanity check — SL/TP must be on correct sides
         if direction == 'long' and (stop_loss >= entry or take_profit <= entry):
@@ -2696,9 +2884,9 @@ class FlexibleICTStrategy:
         reward = abs(take_profit - entry)
         rr_ratio = reward / risk if risk > 0 else 0
         
-        # Minimum RR check - Gold: 1.3, Forex: 1.8
-        min_rr = 1.3 if is_gold else 1.8
-        if rr_ratio < min_rr:
+        # Minimum RR check - Gold: 1.3, Forex: 1.8 (slightly below floor to allow rounding)
+        min_rr_check = 1.3 if is_gold else 1.8
+        if rr_ratio < min_rr_check:
             return None, None, 0
         
         return stop_loss, take_profit, rr_ratio
@@ -2931,6 +3119,8 @@ class FlexibleICTStrategy:
         confidence = 0.60 + (confirmation_count * 0.10)
         if rr_ratio >= 4.0:
             confidence += 0.05
+        if rr_ratio >= 6.0:
+            confidence += 0.05  # Extra boost for high-RR DOL targets
         if setup_data['htf_trend'] and setup_data['htf_trend'] != TrendDirection.RANGING:
             confidence += 0.05
         

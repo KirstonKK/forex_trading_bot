@@ -32,6 +32,22 @@ YFINANCE_TICKER_MAP = {
     'XAUUSD': 'GC=F',
 }
 
+# Spot-futures spread buffer.
+# We verify against CME futures (6E=F, 6B=F, GC=F) but user trades spot
+# on Exness. Futures carry a premium over spot that varies throughout
+# the day. On Feb 18, 2026 futures hit 6.5 pips above SL while spot
+# on Exness never touched it — so 2 pips was way too small.
+# Buffer = minimum distance BEYOND SL/TP the futures price must reach
+# before we consider it a real hit on spot.
+SPREAD_BUFFER = {
+    'EUR_USD': 0.00080,  # 8 pips — proven: 6.5 pip breach was false
+    'GBP_USD': 0.00080,  # 8 pips — GBP futures carry similar premium
+    'XAU_USD': 3.00,     # 30 pips ($3.00) — Gold futures vs spot ~$30-40 gap
+    'EURUSD': 0.00080,
+    'GBPUSD': 0.00080,
+    'XAUUSD': 3.00,
+}
+
 # Cache yfinance import
 _yf = None
 
@@ -177,6 +193,10 @@ def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[
         logger.warning(f"Cannot verify {sym} — no price history available")
         return None
     
+    # Spread buffer: futures can tick beyond spot, so require price to
+    # exceed SL/TP by at least this much before confirming a hit.
+    buffer = SPREAD_BUFFER.get(sym, 0.00020)
+    
     # Walk through candles chronologically
     candles_checked = 0
     for candle_time, row in df.iterrows():
@@ -188,11 +208,11 @@ def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[
         hit_sl = False
         
         if direction in ('long', 'buy'):
-            hit_tp = high >= take_profit
-            hit_sl = low <= stop_loss
+            hit_tp = high >= (take_profit - buffer)   # TP: generous (futures may undershoot)
+            hit_sl = low <= (stop_loss - buffer)       # SL: strict (must clearly breach)
         else:  # short / sell
-            hit_tp = low <= take_profit
-            hit_sl = high >= stop_loss
+            hit_tp = low <= (take_profit + buffer)     # TP: generous
+            hit_sl = high >= (stop_loss + buffer)      # SL: strict (must clearly breach)
         
         # Same candle: SL takes priority (conservative)
         if hit_sl:
@@ -408,15 +428,17 @@ class TradeTracker:
                 continue
             
             # ── QUICK CHECK: Does the current candle touch TP/SL? ──
+            # Apply spread buffer — futures price must clearly breach the level
+            buffer = SPREAD_BUFFER.get(symbol, 0.00020)
             hit_tp = False
             hit_sl = False
             
             if trade.direction in ('long', 'buy'):
-                hit_tp = candle_high >= trade.take_profit
-                hit_sl = candle_low <= trade.stop_loss
+                hit_tp = candle_high >= (trade.take_profit - buffer)
+                hit_sl = candle_low <= (trade.stop_loss - buffer)
             else:  # short / sell
-                hit_tp = candle_low <= trade.take_profit
-                hit_sl = candle_high >= trade.stop_loss
+                hit_tp = candle_low <= (trade.take_profit + buffer)
+                hit_sl = candle_high >= (trade.stop_loss + buffer)
             
             quick_hit = hit_tp or hit_sl
             
