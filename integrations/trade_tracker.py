@@ -198,8 +198,62 @@ def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[
     buffer = SPREAD_BUFFER.get(sym, 0.00020)
     
     # Walk through candles chronologically
+    # PHASE 1: Verify entry was filled (sell limit / buy limit logic)
+    # For SHORT: price must rise TO or ABOVE entry (sell limit triggers)
+    # For LONG: price must drop TO or BELOW entry (buy limit triggers)
+    # If entry was never reached, the limit order never filled.
+    entry_filled = False
+    entry_fill_idx = 0
+    
     candles_checked = 0
-    for candle_time, row in df.iterrows():
+    for idx, (candle_time, row) in enumerate(df.iterrows()):
+        candles_checked += 1
+        high = row['High']
+        low = row['Low']
+        
+        if direction in ('long', 'buy'):
+            # Buy limit fills when price drops TO or BELOW entry
+            if low <= entry_price:
+                entry_filled = True
+                entry_fill_idx = idx
+                break
+        else:  # short / sell
+            # Sell limit fills when price rises TO or ABOVE entry
+            if high >= entry_price:
+                entry_filled = True
+                entry_fill_idx = idx
+                break
+    
+    if not entry_filled:
+        # Entry was never reached — limit order never triggered
+        # Check if enough time has passed to consider it expired
+        time_since_signal = (datetime.now(timezone.utc) - entry_dt).total_seconds()
+        if time_since_signal > 24 * 3600:  # 24 hours without fill = expired
+            logger.info(
+                f"⏰ EXPIRED — {sym} entry at {entry_price:.5f} never reached "
+                f"after {candles_checked} candles ({time_since_signal/3600:.1f}h). Limit order cancelled."
+            )
+            return {
+                'outcome': 'expired',
+                'exit_price': entry_price,
+                'exit_time': datetime.now(timezone.utc).isoformat(),
+                'hit_candle_time': 'never_filled',
+                'candles_checked': candles_checked,
+                'verified': True,
+                'entry_filled': False,
+            }
+        else:
+            logger.debug(
+                f"⏳ {sym} entry at {entry_price:.5f} not yet reached — "
+                f"limit order pending ({candles_checked} candles checked)"
+            )
+            return None  # Still waiting for fill
+    
+    logger.debug(f"✅ {sym} entry filled on candle {entry_fill_idx} — now checking TP/SL")
+    
+    # PHASE 2: Walk from entry fill candle onward, checking TP/SL
+    candles_checked = 0
+    for candle_time, row in list(df.iterrows())[entry_fill_idx:]:
         candles_checked += 1
         high = row['High']
         low = row['Low']
@@ -223,6 +277,7 @@ def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[
                 'hit_candle_time': candle_time.isoformat(),
                 'candles_checked': candles_checked,
                 'verified': True,
+                'entry_filled': True,
             }
         elif hit_tp:
             return {
@@ -232,6 +287,7 @@ def verify_trade_against_history(trade_or_dict, symbol: str = None) -> Optional[
                 'hit_candle_time': candle_time.isoformat(),
                 'candles_checked': candles_checked,
                 'verified': True,
+                'entry_filled': True,
             }
     
     # Neither TP nor SL hit yet
@@ -353,6 +409,21 @@ class TradeTracker:
             verification = verify_trade_against_history(trade)
             if verification and verification.get('verified'):
                 outcome = verification['outcome']
+                
+                # Handle expired (entry never filled — limit order cancelled)
+                if outcome == 'expired':
+                    trade.status = 'expired'
+                    trade.exit_time = verification['exit_time']
+                    trade.pips_result = 0
+                    trade.rr_achieved = 0
+                    self.history.append(asdict(trade))
+                    self._save_history()
+                    logger.info(
+                        f"⏰ EXPIRED on registration — {trade_id} | "
+                        f"Entry {trade.entry_price:.5f} never reached (limit not filled)"
+                    )
+                    return trade_id, {**asdict(trade), 'verified': True, 'entry_filled': False}
+                
                 trade.status = outcome
                 trade.exit_price = verification['exit_price']
                 trade.exit_time = verification['exit_time']
@@ -428,6 +499,46 @@ class TradeTracker:
                 continue
             
             # ── QUICK CHECK: Does the current candle touch TP/SL? ──
+            # First: verify entry was filled (sell/buy limit logic)
+            # For SHORT: price must have risen to entry (candle high >= entry)
+            # For LONG: price must have dropped to entry (candle low <= entry)
+            entry_filled = getattr(trade, '_entry_filled', False)
+            
+            if not entry_filled:
+                if trade.direction in ('long', 'buy'):
+                    if candle_low <= trade.entry_price:
+                        trade._entry_filled = True
+                        entry_filled = True
+                        logger.info(f"✅ Entry filled: {signal_id} | {trade.direction} @ {trade.entry_price:.5f}")
+                else:  # short / sell
+                    if candle_high >= trade.entry_price:
+                        trade._entry_filled = True
+                        entry_filled = True
+                        logger.info(f"✅ Entry filled: {signal_id} | {trade.direction} @ {trade.entry_price:.5f}")
+                
+                if not entry_filled:
+                    # Entry not yet reached — skip TP/SL check
+                    # Check if expired (24h without fill)
+                    try:
+                        entry_dt = datetime.fromisoformat(trade.entry_time.replace('Z', '+00:00'))
+                        if entry_dt.tzinfo is None:
+                            entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                        age_hours = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 3600
+                        if age_hours > 24:
+                            logger.info(
+                                f"⏰ EXPIRED — {signal_id} entry at {trade.entry_price:.5f} "
+                                f"never reached after {age_hours:.1f}h. Cancelling."
+                            )
+                            trade.status = 'expired'
+                            trade.exit_time = datetime.now(timezone.utc).isoformat()
+                            trade.pips_result = 0
+                            trade.rr_achieved = 0
+                            to_remove.append(signal_id)
+                            resolved.append({**asdict(trade), 'verified': True, 'entry_filled': False})
+                    except Exception:
+                        pass
+                    continue  # Don't check TP/SL until entry fills
+            
             # Apply spread buffer — futures price must clearly breach the level
             buffer = SPREAD_BUFFER.get(symbol, 0.00020)
             hit_tp = False

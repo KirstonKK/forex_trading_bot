@@ -336,6 +336,8 @@ if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
             active_signals[sig_id]['exit_time'] = resolution.get('exit_time')
             active_signals[sig_id]['pips_result'] = resolution.get('pips_result')
             active_signals[sig_id]['rr_achieved'] = resolution.get('rr_achieved')
+            if not resolution.get('entry_filled', True):
+                active_signals[sig_id]['entry_filled'] = False
             verified_resolved += 1
         else:
             synced += 1
@@ -579,14 +581,32 @@ def webhook():
                 for trade in resolved:
                     # Sync back to active_signals dict
                     sig_id = trade.get('signal_id', '')
+                    outcome = trade['status']  # 'win', 'loss', or 'expired'
+                    
                     if sig_id in active_signals:
-                        outcome = trade['status']  # 'win' or 'loss'
                         active_signals[sig_id]['status'] = outcome
                         active_signals[sig_id]['exit_price'] = trade.get('exit_price')
                         active_signals[sig_id]['exit_time'] = trade.get('exit_time')
                         active_signals[sig_id]['pips_result'] = trade.get('pips_result')
                         active_signals[sig_id]['rr_achieved'] = trade.get('rr_achieved')
+                        if not trade.get('entry_filled', True):
+                            active_signals[sig_id]['entry_filled'] = False
                         save_signals()
+                    
+                    # Handle expired (entry never filled)
+                    if outcome == 'expired':
+                        logger.info(f"⏰ {sig_id}: Entry never reached — sell/buy limit expired")
+                        tg_text = (
+                            f"⏰ <b>SIGNAL EXPIRED: {symbol}</b>\n"
+                            f"Entry {trade.get('entry_price', 0):.5f} never reached\n"
+                            f"Limit order was never filled — cancelling."
+                        )
+                        if telegram_bot:
+                            try:
+                                telegram_bot.send_message(tg_text)
+                            except Exception:
+                                pass
+                        continue
                     
                     # Log + Telegram notification
                     pips = trade.get('pips_result', 0)
