@@ -237,110 +237,177 @@ class TelegramNotifier:
     
     def send_daily_report(self, report_data: Dict[str, Any]) -> bool:
         """
-        Send comprehensive daily trading report.
+        Send comprehensive daily trading report with verified trade outcomes.
         
         Args:
             report_data: Dictionary containing:
                 - signals_generated: list of signals
-                - signals_rejected: list of rejection reasons
-                - market_analysis: dict of pair analyses
-                - session_summary: session activity
+                - rejections_summary: dict of rejection reasons
+                - trade_outcomes: list of resolved trades
+                - session_stats: session activity
         """
         date_str = datetime.now().strftime('%Y-%m-%d')
+        day_name = datetime.now().strftime('%A')
+        
+        # --- Load trade outcomes from active_signals.json ---
+        outcomes = report_data.get('trade_outcomes', [])
+        if not outcomes:
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                sig_file = _Path(__file__).parent.parent / 'data' / 'active_signals.json'
+                if sig_file.exists():
+                    with open(sig_file) as _f:
+                        all_sigs = _json.load(_f)
+                    for sid, sig in all_sigs.items():
+                        det = sig.get('detected_at', '')
+                        if date_str in det:
+                            outcomes.append(sig)
+            except Exception:
+                pass
+        
+        wins = [t for t in outcomes if t.get('status') == 'win']
+        losses = [t for t in outcomes if t.get('status') == 'loss']
+        expired = [t for t in outcomes if t.get('status') == 'expired']
+        pending = [t for t in outcomes if t.get('status') in ('pending', 'active')]
+        resolved = wins + losses
+        
+        total_r = sum(t.get('rr_achieved', 0) for t in wins) + sum(t.get('rr_achieved', 0) for t in losses)
+        win_r = sum(t.get('rr_achieved', 0) for t in wins)
+        win_rate = len(wins) / len(resolved) * 100 if resolved else 0
         
         # Header
-        message = f"""📋 <b>DAILY TRADING REPORT</b>
-📅 {date_str} | Session: 10:00-17:00 UTC
+        r_emoji = "🟢" if total_r > 0 else "🔴" if total_r < 0 else "⚪"
+        message = f"""📋 <b>END OF DAY REPORT</b>
+📅 {date_str} | {day_name}
+
+{r_emoji} <b>Day Result: {total_r:+.1f}R</b> ({len(wins)}W / {len(losses)}L"""
+        
+        if expired:
+            message += f" / {len(expired)}E"
+        if pending:
+            message += f" / {len(pending)}P"
+        message += f""")
+🎯 Win Rate: {win_rate:.0f}%
 
 {'='*30}
 """
         
-        # Signals Generated
+        # --- TRADE OUTCOMES (the main event) ---
+        if resolved or expired:
+            message += "\n📊 <b>TRADE OUTCOMES</b>\n"
+            
+            for t in sorted(outcomes, key=lambda x: x.get('detected_at', '')):
+                status = t.get('status', '?')
+                if status not in ('win', 'loss', 'expired'):
+                    continue
+                    
+                pair = str(t.get('symbol', t.get('pair', '?'))).replace('_', '/')
+                direction = t.get('direction', '?')
+                entry = t.get('entry_price', 0)
+                pips = t.get('pips_result', 0)
+                rr = t.get('rr_achieved', 0)
+                setup = t.get('setup_type', '?')
+                filled = t.get('entry_filled', True)
+                
+                if status == 'win':
+                    icon = "✅"
+                    pips_str = f"+{pips:.1f} pips" if isinstance(pips, (int, float)) else str(pips)
+                    rr_str = f"+{rr:.1f}R"
+                elif status == 'loss':
+                    icon = "❌"
+                    pips_str = f"{pips:.1f} pips" if isinstance(pips, (int, float)) else str(pips)
+                    rr_str = f"{rr:.1f}R"
+                else:  # expired
+                    icon = "🚫"
+                    pips_str = "not filled"
+                    rr_str = "0R"
+                
+                dir_arrow = "⬇️" if direction == 'short' else "⬆️"
+                message += f"\n{icon} <b>{pair}</b> {dir_arrow} {direction}\n"
+                message += f"   {setup} | {pips_str} | {rr_str}\n"
+            
+            if pending:
+                message += f"\n⏳ <b>{len(pending)} trade(s) still pending</b>\n"
+        
+        # --- BY PAIR SUMMARY ---
+        pair_stats = {}
+        for t in resolved:
+            p = str(t.get('symbol', t.get('pair', 'Unknown')))
+            if p not in pair_stats:
+                pair_stats[p] = {'wins': 0, 'losses': 0, 'r': 0}
+            if t.get('status') == 'win':
+                pair_stats[p]['wins'] += 1
+            else:
+                pair_stats[p]['losses'] += 1
+            pair_stats[p]['r'] += t.get('rr_achieved', 0)
+        
+        if pair_stats:
+            message += f"\n{'='*30}\n"
+            message += "\n💱 <b>BY PAIR</b>\n"
+            for pair, ps in sorted(pair_stats.items()):
+                display = pair.replace('_', '/')
+                wr = ps['wins'] / (ps['wins'] + ps['losses']) * 100 if (ps['wins'] + ps['losses']) > 0 else 0
+                p_emoji = "🟢" if ps['r'] > 0 else "🔴"
+                message += f"{p_emoji} {display}: {ps['wins']}W/{ps['losses']}L | {ps['r']:+.1f}R | {wr:.0f}% WR\n"
+        
+        # --- BY SETUP SUMMARY ---
+        setup_stats = {}
+        for t in resolved:
+            s = t.get('setup_type', 'Unknown')
+            if s not in setup_stats:
+                setup_stats[s] = {'wins': 0, 'losses': 0, 'r': 0}
+            if t.get('status') == 'win':
+                setup_stats[s]['wins'] += 1
+            else:
+                setup_stats[s]['losses'] += 1
+            setup_stats[s]['r'] += t.get('rr_achieved', 0)
+        
+        if setup_stats:
+            message += f"\n{'='*30}\n"
+            message += "\n🔧 <b>BY SETUP</b>\n"
+            for setup, ss in sorted(setup_stats.items(), key=lambda x: x[1]['r'], reverse=True):
+                s_emoji = "✅" if ss['r'] > 0 else "❌"
+                message += f"{s_emoji} {setup}: {ss['wins']}W/{ss['losses']}L | {ss['r']:+.1f}R\n"
+        
+        # --- SIGNALS GENERATED ---
         signals = report_data.get('signals_generated', [])
         if signals:
+            message += f"\n{'='*30}\n"
             message += f"\n🎯 <b>SIGNALS GENERATED ({len(signals)})</b>\n"
-            for sig in signals[-5:]:  # Last 5 signals
+            for sig in signals:
                 direction = sig.get('direction', 'N/A')
                 symbol = sig.get('symbol', 'N/A').replace('_', '/')
                 entry = sig.get('entry_price', 0)
                 rr = sig.get('risk_reward', 0)
                 setup = sig.get('setup_type', 'ICT')
                 confirmations = sig.get('confirmations', [])
-                emoji = "🟢" if direction == "BUY" else "🔴"
+                dir_arrow = "⬇️" if direction in ('short', 'SELL') else "⬆️"
                 
-                message += f"\n{emoji} <b>{symbol}</b> {direction}\n"
-                message += f"   Entry: {entry:.5f} | RR: 1:{rr:.1f}\n"
-                message += f"   Setup: {setup}\n"
-                message += f"   ✓ {', '.join(confirmations[:3])}\n"
-        else:
-            message += "\n🎯 <b>SIGNALS GENERATED: 0</b>\n"
-            message += "   No valid ICT setups detected today.\n"
+                message += f"\n{dir_arrow} <b>{symbol}</b> {direction}\n"
+                message += f"   Entry: {entry:.5f} | RR: 1:{rr:.1f}\n" if entry < 100 else f"   Entry: {entry:.2f} | RR: 1:{rr:.1f}\n"
+                message += f"   {setup} | ✓ {', '.join(confirmations[:3])}\n"
         
-        # Rejections Analysis
+        # --- TOP REJECTIONS ---
         rejections = report_data.get('rejections_summary', {})
         if rejections:
             message += f"\n{'='*30}\n"
-            message += "\n❌ <b>WHY SIGNALS WERE REJECTED</b>\n"
-            
-            # Sort by count
+            message += "\n❌ <b>TOP REJECTIONS</b>\n"
             sorted_reasons = sorted(rejections.items(), key=lambda x: x[1], reverse=True)
-            for reason, count in sorted_reasons[:6]:
+            for reason, count in sorted_reasons[:5]:
                 message += f"   • {reason}: {count}x\n"
         
-        # Per-Pair Analysis
-        pair_analysis = report_data.get('pair_analysis', {})
-        if pair_analysis:
-            message += f"\n{'='*30}\n"
-            message += "\n📈 <b>PAIR-BY-PAIR ANALYSIS</b>\n"
-            
-            for pair, analysis in pair_analysis.items():
-                display_pair = pair.replace('_', '/')
-                bias = analysis.get('htf_bias', 'neutral')
-                bias_lower = bias.lower()
-                if 'bullish' in bias_lower:
-                    bias_emoji = "🟢"
-                elif 'bearish' in bias_lower:
-                    bias_emoji = "🔴"
-                else:
-                    bias_emoji = "⚪"
-                
-                message += f"\n<b>{display_pair}</b> {bias_emoji}\n"
-                message += f"   HTF Bias: {bias}\n"
-                
-                if analysis.get('sweeps_detected'):
-                    message += f"   Sweeps: {analysis['sweeps_detected']}\n"
-                if analysis.get('fvgs_available'):
-                    message += f"   FVGs: {analysis['fvgs_available']}\n"
-                if analysis.get('obs_available'):
-                    message += f"   Order Blocks: {analysis['obs_available']}\n"
-                if analysis.get('rejection_reason'):
-                    message += f"   ⚠️ {analysis['rejection_reason']}\n"
-        
-        # Market Sentiment
-        sentiment = report_data.get('market_sentiment', '')
-        if sentiment:
-            message += f"\n{'='*30}\n"
-            message += f"\n🧠 <b>MARKET SENTIMENT</b>\n{sentiment}\n"
-        
-        # Session Stats
+        # --- SESSION STATS ---
         stats = report_data.get('session_stats', {})
         if stats:
             message += f"\n{'='*30}\n"
-            message += "\n📊 <b>SESSION STATISTICS</b>\n"
-            message += f"   Candles Analyzed: {stats.get('candles_analyzed', 0)}\n"
-            message += f"   Setups Checked: {stats.get('setups_checked', 0)}\n"
-            message += f"   Valid Sweeps: {stats.get('valid_sweeps', 0)}\n"
-            message += f"   Valid BoS: {stats.get('valid_bos', 0)}\n"
-            
-            # Format active time
-            hours = stats.get('hours_active', 0)
-            mins = stats.get('minutes_active', 0)
-            time_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m"
-            message += f"   Session Active: {time_str}\n"
+            message += "\n📊 <b>SESSION STATS</b>\n"
+            message += f"   Candles: {stats.get('candles_analyzed', 0)} | Setups: {stats.get('setups_checked', 0)}\n"
+            message += f"   Sweeps: {stats.get('valid_sweeps', 0)} | BoS: {stats.get('valid_bos', 0)}\n"
         
         # Footer
         message += f"\n{'='*30}\n"
-        message += "\n<i>ICT/SMC Strategy | 1:2 RR | 60% Target</i>"
+        message += f"\n<i>Jarvis ICT/SMC | Dynamic TP | Entry Fill Verified</i>"
         
         return self.send_message(message)
     

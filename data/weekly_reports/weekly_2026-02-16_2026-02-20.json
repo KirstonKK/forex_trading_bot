@@ -1,0 +1,114 @@
+{
+  "week_start": "2026-02-16",
+  "week_end": "2026-02-20",
+  "total_signals": 31,
+  "wins": 8,
+  "losses": 14,
+  "expired": 9,
+  "pending": 0,
+  "win_rate": 36.36363636363637,
+  "total_r": 1.1247156616270253,
+  "win_r": 15.124715661627025,
+  "loss_r": 14.0,
+  "profit_factor": 1.080336832973359,
+  "total_pips_forex": 45.996111869812694,
+  "total_pips_gold": -382.49267578125,
+  "by_pair": {
+    "EUR_USD": {
+      "wins": 3,
+      "losses": 4,
+      "expired": 3,
+      "r": 2.0,
+      "pips": 22.996829986572376
+    },
+    "GBP_USD": {
+      "wins": 3,
+      "losses": 4,
+      "expired": 4,
+      "r": 2.124715661627025,
+      "pips": 22.999281883240297
+    },
+    "XAU_USD": {
+      "wins": 2,
+      "losses": 6,
+      "expired": 2,
+      "r": -3.0,
+      "pips": -382.49267578125
+    }
+  },
+  "by_setup": {
+    "ICT_SWEEP_CONFIRM": {
+      "wins": 1,
+      "losses": 4,
+      "r": -2.5
+    },
+    "HTF_LIQUIDITY_BOS": {
+      "wins": 7,
+      "losses": 8,
+      "r": 5.624715661627025
+    },
+    "LIQ_SWEEP_ENGULF": {
+      "wins": 0,
+      "losses": 2,
+      "r": -2.0
+    }
+  },
+  "by_day": {
+    "Mon 02/16": {
+      "wins": 0,
+      "losses": 0,
+      "expired": 5,
+      "r": 0
+    },
+    "Tue 02/17": {
+      "wins": 1,
+      "losses": 4,
+      "expired": 1,
+      "r": -2.5
+    },
+    "Wed 02/18": {
+      "wins": 3,
+      "losses": 4,
+      "expired": 1,
+      "r": 2.0
+    },
+    "Thu 02/19": {
+      "wins": 1,
+      "losses": 3,
+      "expired": 2,
+      "r": -1.0
+    },
+    "Fri 02/20": {
+      "wins": 3,
+      "losses": 3,
+      "expired": 0,
+      "r": 2.6247156616270253
+    }
+  },
+  "equity_curve": [
+    -1.0,
+    -2.0,
+    -3.0,
+    -1.5,
+    -2.5,
+    -3.5,
+    -4.5,
+    -2.5,
+    -0.5,
+    -1.5,
+    0.5,
+    -0.5,
+    1.5,
+    0.5,
+    -0.5,
+    -1.5,
+    0.6,
+    2.6,
+    1.6,
+    0.6,
+    -0.4,
+    1.1
+  ],
+  "best_win_streak": 2,
+  "worst_loss_streak": 3
+}
