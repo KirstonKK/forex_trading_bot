@@ -1571,27 +1571,9 @@ if __name__ == '__main__':
                         logger.info("🔴 Session end alert sent")
                         last_session_end_date = today
                 
-                # Send daily report after 17:00 UTC (session close) 
-                if now.hour >= 17 and last_report_date != today:
-                    if REPORT_TRACKER_AVAILABLE and get_report_tracker:
-                        tracker = get_report_tracker()
-                        report_data = tracker.get_report_data()
-                        
-                        # Only send if we have some activity
-                        if report_data.get('signals_generated') or report_data.get('rejections_summary'):
-                            # Send to personal
-                            if telegram_notifier:
-                                telegram_notifier.send_daily_report(report_data)
-                            # Send to group
-                            if telegram_group_notifier:
-                                telegram_group_notifier.send_daily_report(report_data)
-                            tracker.mark_report_sent()
-                            logger.info("📊 Daily report sent to Telegram (personal + group)")
-                        
-                        last_report_date = today
-                
-                # Send weekly report on Sunday at 17:00 UTC
-                if now.weekday() == 6 and now.hour >= 17 and last_weekly_date != today:
+                # === WEEKLY PERFORMANCE REPORT (Friday 22:00 UTC) ===
+                # Sent after NY close, consolidates the entire week
+                if now.weekday() == 4 and now.hour >= 22 and last_weekly_date != today:
                     if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
                         reporter = get_weekly_reporter()
                         weekly_text = reporter.format_telegram_report()
@@ -1719,17 +1701,17 @@ if __name__ == '__main__':
                         )
                     
                     elif text == '/report':
-                        # Send daily report
-                        if REPORT_TRACKER_AVAILABLE and get_report_tracker:
-                            tracker = get_report_tracker()
-                            report_data = tracker.get_report_data()
+                        # Send weekly performance report on demand
+                        if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
+                            reporter = get_weekly_reporter()
+                            weekly_text = reporter.format_telegram_report()
                             if telegram_notifier:
-                                telegram_notifier.send_daily_report(report_data)
+                                telegram_notifier.send_message(weekly_text)
                             if telegram_group_notifier:
-                                telegram_group_notifier.send_daily_report(report_data)
-                            response_text = "📊 Daily report sent!"
+                                telegram_group_notifier.send_message(weekly_text)
+                            response_text = "📊 Weekly report sent!"
                         else:
-                            response_text = "❌ Report tracker not available"
+                            response_text = "❌ Weekly reporter not available"
                     
                     elif text == '/pairs':
                         response_text = (
@@ -1804,13 +1786,12 @@ if __name__ == '__main__':
                         response_text = (
                             "🤖 <b>Jarvis Commands</b>\n\n"
                             "/status - Bot status & prices\n"
-                            "/report - Send daily report\n"
-                            "/weekly - Send weekly report\n"
+                            "/report - Weekly performance report\n"
+                            "/stats - Today's statistics\n"
                             "/ml - ML model stats\n"
                             "/abtest - A/B test comparison\n"
                             "/pairs - Tracked pairs\n"
                             "/session - Session times\n"
-                            "/stats - Today's statistics\n"
                             "/help - This help message"
                         )
                     
