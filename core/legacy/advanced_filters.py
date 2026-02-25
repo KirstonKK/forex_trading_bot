@@ -525,10 +525,16 @@ class AdvancedFilters:
         Comprehensive check: Can we trade now?
         - Not during high-impact news
         - Not on weekends (market closed)
+        - Not outside quality session hours (08:00–21:00 UTC)
         
-        Forex is open 24/5 — Sunday 5pm EST to Friday 5pm EST.
-        Setups can form at any hour (Asian sweeps, London, NY).
-        We only block weekends and major news events.
+        Session window rationale:
+          08:00–17:00 — London session (primary liquidity)
+          13:00–16:00 — London/NY overlap (peak volatility)
+          16:00–21:00 — New York session (secondary liquidity)
+        
+        Blocked: 21:00–08:00 UTC (Asian session + pre-London).
+        Pre-London (07:00–08:00) sweeps look valid but often fake out
+        before the real London move. Better to wait for real liquidity.
         
         Returns:
             (can_trade, reason_if_not)
@@ -552,6 +558,11 @@ class AdvancedFilters:
         
         if weekday == 4 and hour >= 22:  # Friday after ~5pm EST
             return False, "Friday close - market closing"
+        
+        # Session-hour filter: only trade 08:00–21:00 UTC (London open → NY close)
+        # Blocks Asian dead-zone and pre-London fakeouts.
+        if hour < 8 or hour >= 21:
+            return False, f"Outside session hours ({hour:02d}:00 UTC — need 08:00-21:00)"
         
         return True, ''
     

@@ -134,7 +134,11 @@ class FlexibleICTStrategy:
         
         # Signal cooldown - prevent duplicate/similar signals
         self._last_signal_time = {}  # {'EURUSD': timestamp}
-        self._signal_cooldown_minutes = 240  # 4 hours between signals on same pair (was 30min = spam)
+        self._signal_cooldown_minutes = 120  # 2 hours between signals on same pair
+        
+        # Losing zone tracker (added 2026-02-25) — prevents re-entering same failing price zone
+        # EUR kept shorting ~1.178x-1.180x and losing each time; this blocks that
+        self._recent_losses = {}  # {'EUR_USD': [{'price': 1.1797, 'direction': 'short', 'time': ts}]}
         
         # All market data for correlated pair access (SMT divergence)
         self._all_market_data = {}  # {'EUR_USD': {'5M': [...], '1H': [...]}, 'GBP_USD': {...}}
@@ -177,6 +181,8 @@ class FlexibleICTStrategy:
                     self.current_date = datetime.now(timezone.utc).date()
                 # Restore recent signal directions
                 self._recent_signals = state.get('recent_signals', {})
+                # Restore recent losses for zone dedup
+                self._recent_losses = state.get('recent_losses', {})
                 import logging
                 logging.getLogger('strategy').info(
                     f"📂 Loaded signal state: cooldowns={list(self._last_signal_time.keys())}, "
@@ -194,7 +200,8 @@ class FlexibleICTStrategy:
                 'last_signal_time': self._last_signal_time,
                 'trades_today': self.trades_today,
                 'current_date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
-                'recent_signals': self._recent_signals
+                'recent_signals': self._recent_signals,
+                'recent_losses': self._recent_losses
             }
             with open(self._STATE_FILE, 'w') as f:
                 json.dump(state, f, indent=2)
@@ -284,6 +291,48 @@ class FlexibleICTStrategy:
             return False
         
         return True
+    
+    def record_loss(self, symbol: str, entry_price: float, direction: str, timestamp: int = None):
+        """
+        Record a losing trade's price level so we don't re-enter the same zone.
+        Called when a trade hits SL.
+        """
+        ts = timestamp or int(datetime.now(timezone.utc).timestamp())
+        if symbol not in self._recent_losses:
+            self._recent_losses[symbol] = []
+        self._recent_losses[symbol].append({
+            'price': entry_price,
+            'direction': direction,
+            'time': ts
+        })
+        # Keep only last 5 losses per symbol
+        self._recent_losses[symbol] = self._recent_losses[symbol][-5:]
+        self._save_state()
+    
+    def check_losing_zone(self, symbol: str, entry_price: float, direction: str, timestamp: int) -> bool:
+        """
+        Check if this entry is near a recent losing level in the same direction.
+        Returns True if it's a repeat loser zone (should REJECT).
+        
+        Logic: If we lost shorting at 1.1797 and now want to short at 1.1800,
+        that's within 50 pips of the same zone — skip it.
+        """
+        losses = self._recent_losses.get(symbol, [])
+        if not losses:
+            return False
+        
+        pip_value = self.get_pip_value(symbol)
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        zone_tolerance = 50 * pip_value if not is_gold else 20.0  # 50 pips forex, $20 gold
+        expiry = 24 * 3600  # 24 hours
+        
+        for loss in losses:
+            # Same direction and within 24h?
+            if loss['direction'] == direction and (timestamp - loss['time']) < expiry:
+                if abs(entry_price - loss['price']) < zone_tolerance:
+                    return True  # Too close to a recent loss at same direction
+        
+        return False
     
     def check_5m_entry_trigger(self, candles: List[dict], direction: str) -> bool:
         """
@@ -1256,8 +1305,17 @@ class FlexibleICTStrategy:
                     confirmations.append("OB_AT_SWEEP")
                     break
         
-        # Check HTF trend (bonus, not required)
+        # Check HTF trend — REJECT if directly counter-trend (added 2026-02-25)
+        # Ranging is OK (engulfing decides direction), but fighting a clear 4H trend = losing
         htf_trend = self.determine_htf_trend(candles, 240)
+        if htf_trend == TrendDirection.BULLISH and direction == 'short':
+            self._last_rejection_reasons.append(
+                f"Opt4: Counter-trend rejected (4H=bullish, engulfing=short)")
+            return None
+        if htf_trend == TrendDirection.BEARISH and direction == 'long':
+            self._last_rejection_reasons.append(
+                f"Opt4: Counter-trend rejected (4H=bearish, engulfing=long)")
+            return None
         if htf_trend == TrendDirection.BULLISH and direction == 'long':
             confirmations.append("HTF_ALIGNED")
         elif htf_trend == TrendDirection.BEARISH and direction == 'short':
@@ -2010,6 +2068,31 @@ class FlexibleICTStrategy:
 
         direction = sweep_info['direction']
 
+        # ====== HTF TREND GATE (mandatory — added 2026-02-25) ======
+        # Without this, Opt5 was taking counter-trend trades and losing badly.
+        # Example: XAU_USD_78 shorted gold when 4H was bullish → instant SL hit.
+        # Rule: sweep direction MUST align with 4H trend. Ranging = allowed (sweep decides).
+        htf_trend_4h = self.determine_htf_trend(candles_5m, 240)
+        htf_trend_1h = self.determine_htf_trend(candles_5m, 60)
+        if htf_trend_4h == TrendDirection.BULLISH and direction == 'short':
+            self._last_rejection_reasons.append(
+                f"Opt5: Counter-trend rejected (4H=bullish, signal=short)")
+            return None
+        if htf_trend_4h == TrendDirection.BEARISH and direction == 'long':
+            self._last_rejection_reasons.append(
+                f"Opt5: Counter-trend rejected (4H=bearish, signal=long)")
+            return None
+        # If 4H is ranging but 1H has a clear trend, respect 1H
+        if htf_trend_4h == TrendDirection.RANGING:
+            if htf_trend_1h == TrendDirection.BULLISH and direction == 'short':
+                self._last_rejection_reasons.append(
+                    f"Opt5: Counter-trend rejected (4H=ranging, 1H=bullish, signal=short)")
+                return None
+            if htf_trend_1h == TrendDirection.BEARISH and direction == 'long':
+                self._last_rejection_reasons.append(
+                    f"Opt5: Counter-trend rejected (4H=ranging, 1H=bearish, signal=long)")
+                return None
+
         # Sweep level dedup: don't re-try the same sweep level in the same direction
         # Prevents hammering 4x on the same 1H swing low when market is trending against us
         pip_value = self.get_pip_value(symbol)
@@ -2722,19 +2805,23 @@ class FlexibleICTStrategy:
         sl_points = sl_distance / point_value
         
         # === ATR-based dynamic minimum SL ===
-        # SL must be at least 1.5x the average 5M candle range to avoid noise
+        # SL must be at least Nx the average 5M candle range to avoid noise
+        # Gold uses higher multiplier (2.5x) because its intraday volatility is extreme
         recent_ranges = [c['high'] - c['low'] for c in candles[-20:]]
         avg_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else 0
-        atr_min_sl = (avg_range * 1.5) / point_value  # 1.5x ATR in points
+        atr_multiplier = 2.5 if is_gold else 1.5  # Gold needs wider SL (was 1.5x for both)
+        atr_min_sl = (avg_range * atr_multiplier) / point_value  # Nx ATR in points
         
         # Max SL limits - different for Gold vs Forex
+        # Gold SL widened 2026-02-25: $10-15 min was too tight for $5200 gold,
+        # normal intraday ATR is $25-40. Bot kept getting stopped out by noise.
         if is_gold:
             if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 2000   # $20 max for HTF_LIQUIDITY_BOS
-                min_sl_points = 1000   # $10 min
+                max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS (was $20)
+                min_sl_points = 2000   # $20 min (was $10)
             else:
-                max_sl_points = 3500   # $35 max for other setups
-                min_sl_points = 1500   # $15 min
+                max_sl_points = 4000   # $40 max for other setups (was $35)
+                min_sl_points = 2500   # $25 min (was $15)
         else:
             # Forex: Tighter SL = better R:R, pivot-based placement is precise
             if setup_type == 'HTF_LIQUIDITY_BOS':
@@ -2899,9 +2986,17 @@ class FlexibleICTStrategy:
         return risk_map.get(min(confirmation_count, 3), 0.0)
     
     def can_take_trade(self, timestamp: int, symbol: str = 'EURUSD') -> bool:
-        """Check daily limits (max 3 trades/day per symbol).
+        """Daily housekeeping — reset counters on new day.
         
-        Note: 4-hour cooldown is handled separately by check_signal_cooldown().
+        Philosophy (updated 2026-02-25):
+        - NO hard daily cap. Trust the quality filters to gate entries:
+          • HTF trend gates (block counter-trend)
+          • Session-hour filter 08:00–21:00 UTC (block Asian junk)
+          • 2-hour cooldown per pair (prevent spam)
+          • Losing-zone dedup (stop re-entering failed zones)
+          • News filter (avoid event-driven chaos)
+        - If 5 quality setups pass all those filters, take all 5.
+        - If only 1 passes, take 1. The filters decide, not a cap.
         """
         current_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
         
@@ -2909,16 +3004,8 @@ class FlexibleICTStrategy:
         if self.current_date != current_date:
             self.current_date = current_date
             self.trades_today = {}  # Reset all pairs
+            self._recent_losses = {}  # Reset losing zones tracker
             self._save_state()
-        
-        # Get trade count for this specific symbol
-        symbol_trades = self.trades_today.get(symbol, 0)
-        
-        # Allow up to 3 signals per day per pair
-        # Catches London open, NY session, and late-session setups
-        if symbol_trades >= 3:
-            _log.debug(f"⏸️ [{symbol}] Daily limit reached ({symbol_trades}/3)")
-            return False
         
         return True
     
@@ -2988,10 +3075,8 @@ class FlexibleICTStrategy:
         
         _log.info(f"📊 [{symbol}] Passed session/news filters — analyzing setups... (price: {base_candles[-1]['close']:.5f})")
         
-        # Check if we already took a trade for this symbol today
-        if not self.can_take_trade(current_timestamp, symbol):
-            self._last_rejection_reasons.append(f"Already traded {symbol} today (1 per day limit)")
-            return None
+        # Daily housekeeping (reset counters on new day)
+        self.can_take_trade(current_timestamp, symbol)
         
         # Determine priority based on symbol
         # Pair-specific priority (waterfall — first match wins):
@@ -3056,6 +3141,14 @@ class FlexibleICTStrategy:
         direction = setup_data['direction']
         
         # ===== NEW FILTERS =====
+        
+        # 0. Losing zone filter — don't re-enter same price zone that just lost
+        entry_price_check = base_candles[-1]['close']
+        if self.check_losing_zone(symbol, entry_price_check, direction, current_timestamp):
+            self._last_rejection_reasons.append(
+                f"Losing zone: recent loss near {entry_price_check:.5f} {direction} — skipping")
+            _log.info(f"⚠️ [{symbol}] Rejected: Same losing zone")
+            return None
         
         # 1. Correlation Filter - prevent opposite signals on EU/GBP
         if self.check_correlation_conflict(symbol, direction, current_timestamp):
@@ -3126,7 +3219,7 @@ class FlexibleICTStrategy:
         
         confidence = min(confidence, 0.95)
         
-        # Record trade for this symbol (1 per day limit)
+        # Record trade for daily cap tracking
         self.record_trade(symbol)
         
         # Record signal time for cooldown tracking

@@ -625,6 +625,13 @@ def webhook():
                     else:
                         emoji = "❌"
                         msg = f"🛑 SL HIT — {pips:.1f} pips"
+                        # Record losing zone so strategy won't re-enter same price area
+                        try:
+                            strategy.record_loss(symbol, entry, direction,
+                                                 int(datetime.now(timezone.utc).timestamp()))
+                            logger.info(f"📝 Recorded losing zone: {symbol} {direction} @ {entry:.5f}")
+                        except Exception as e:
+                            logger.warning(f"Could not record losing zone: {e}")
                     
                     verify_tag = "🔍 VERIFIED" if verified else "⚠️ UNVERIFIED"
                     
