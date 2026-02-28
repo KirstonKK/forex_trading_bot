@@ -213,7 +213,7 @@ class MLRiskModel:
         self.model = None
         self.is_trained = False
         self.training_data: List[Dict] = []
-        self.min_training_samples = 30  # Minimum trades before using ML
+        self.min_training_samples = 50  # Minimum trades before ML activates (raised from 30 — need statistical significance)
         
         self._load_training_data()
         self._load_model()

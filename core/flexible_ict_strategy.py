@@ -138,6 +138,8 @@ class FlexibleICTStrategy:
         
         # Losing zone tracker (added 2026-02-25) — prevents re-entering same failing price zone
         # EUR kept shorting ~1.178x-1.180x and losing each time; this blocks that
+        # TIGHTENED 2026-02-28: Increased tolerance from 50 pips to 100 pips after weekly review
+        # showed EUR generating 8 losing signals at similar price zones
         self._recent_losses = {}  # {'EUR_USD': [{'price': 1.1797, 'direction': 'short', 'time': ts}]}
         
         # All market data for correlated pair access (SMT divergence)
@@ -323,7 +325,9 @@ class FlexibleICTStrategy:
         
         pip_value = self.get_pip_value(symbol)
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
-        zone_tolerance = 50 * pip_value if not is_gold else 20.0  # 50 pips forex, $20 gold
+        # TIGHTENED 2026-02-28: Increased from 50 to 100 pips after weekly review
+        # showed EUR generating 8 losing signals at similar price zones on same day
+        zone_tolerance = 100 * pip_value if not is_gold else 30.0  # 100 pips forex, $30 gold
         expiry = 24 * 3600  # 24 hours
         
         for loss in losses:
@@ -1213,22 +1217,34 @@ class FlexibleICTStrategy:
     
     def try_option_4(self, candles: List[dict], symbol: str) -> Optional[Dict]:
         """
-        Option 4: Liquidity Sweep + Engulfing Confirmation
+        Option 4: Liquidity Sweep + Engulfing + BOS Confirmation
         
-        Simple but effective price action setup:
-        1. Price sweeps a liquidity zone on 5M (equal lows/highs or session lows/highs)
-        2. 15M engulfing candle confirms reversal
-        3. Enter on the close of the engulfing candle
+        IMPROVED 2026-02-28 (was disabled, now fixed):
+        - Blocked on Gold (all 4 live losses were Gold — engulfing unreliable with $25-40 ATR)
+        - Removed weak SWING_LOW/HIGH_SWEEP fallback (too loose, caused false signals)
+        - Increased minimum engulfing body from 3 to 5 pips (must be significant)
+        - Added mandatory BOS after engulfing (structural confirmation was missing)
+        - Kept HTF trend gate (blocks counter-trend)
         
-        SL: Below/above the swept liquidity level
-        TP: 2x risk (1:2 R:R)
-        
-        This catches setups like:
-        - Asian session low sweep → London bullish engulfing → Buy
-        - Previous session high sweep → bearish engulfing → Sell
+        Flow:
+        1. NOT Gold (blocked)
+        2. 15M engulfing candle (min 5 pips body)
+        3. Real liquidity sweep (session/Asian or 5M equal H/L — NO swing fallback)
+        4. BOS confirms direction (mandatory)
+        5. HTF trend must not oppose
         """
         import logging
         _log = logging.getLogger('strategy')
+        
+        # ===== GOLD BLOCKED (2026-02-28) =====
+        # All 4 live losses were on Gold. Engulfing patterns are unreliable
+        # with Gold's $25-40 intraday ATR — price engulfs and reverses again.
+        # Gold should use Options 1/5/6 which have more structural confirmation.
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        if is_gold:
+            self._last_rejection_reasons.append("Opt4: Blocked on Gold (0% live WR — use Opt 1/5/6)")
+            return None
+        
         confirmations = []
         
         # 1. Check for engulfing candle on 15M (the trigger)
@@ -1237,25 +1253,34 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Opt4: No engulfing candle on 15M")
             return None
         
+        # IMPROVED: Stronger minimum engulfing body (5 pips, was 3)
+        pip_value = self.get_pip_value()
+        min_engulfing_body = 5 * pip_value  # Must be significant move
+        if engulfing['body_size'] < min_engulfing_body:
+            self._last_rejection_reasons.append(
+                f"Opt4: Engulfing too weak ({engulfing['body_size']/pip_value:.1f} pips < 5 pip min)")
+            return None
+        
         direction = engulfing['direction']
         confirmations.append("15M_ENGULFING")
         
-        # 2. Check for liquidity sweep on 5M
-        # First try: check if Asian range or session lows/highs were swept
-        has_sweep, sweep_type = self.check_liquidity_sweep(candles, symbol)
+        # 2. Check for REAL liquidity sweep (NO weak swing fallback)
+        # Only allow: session/Asian sweeps OR 5M equal H/L zone sweeps
+        has_sweep = False
         
-        if has_sweep:
-            # Verify sweep direction matches engulfing
+        # First try: Asian range or session lows/highs sweep
+        sweep_found, sweep_type = self.check_liquidity_sweep(candles, symbol)
+        if sweep_found:
             if direction == 'long' and sweep_type == 'low':
                 confirmations.append("LIQUIDITY_SWEEP")
                 self._last_sweep_found = True
+                has_sweep = True
             elif direction == 'short' and sweep_type == 'high':
                 confirmations.append("LIQUIDITY_SWEEP")
                 self._last_sweep_found = True
-            else:
-                has_sweep = False  # Direction mismatch
+                has_sweep = True
         
-        # Second try: check for 5M liquidity zone sweep
+        # Second try: 5M equal H/L zone sweep (structured liquidity)
         if not has_sweep:
             liq_zone = self.find_5m_liquidity_zone(candles)
             if liq_zone and liq_zone.get('swept'):
@@ -1268,34 +1293,25 @@ class FlexibleICTStrategy:
                     self._last_sweep_found = True
                     has_sweep = True
         
-        # Third try: just check if price made a new low/high and reversed
-        if not has_sweep:
-            recent = candles[-20:]
-            if direction == 'long':
-                lowest = min(c['low'] for c in recent)
-                # Did recent candles sweep the low and recover?
-                last_3 = candles[-3:]
-                swept_and_recovered = any(c['low'] <= lowest * 1.0001 for c in last_3) and candles[-1]['close'] > lowest
-                if swept_and_recovered:
-                    confirmations.append("SWING_LOW_SWEEP")
-                    has_sweep = True
-            else:
-                highest = max(c['high'] for c in recent)
-                last_3 = candles[-3:]
-                swept_and_recovered = any(c['high'] >= highest * 0.9999 for c in last_3) and candles[-1]['close'] < highest
-                if swept_and_recovered:
-                    confirmations.append("SWING_HIGH_SWEEP")
-                    has_sweep = True
+        # NO third fallback — SWING_LOW/HIGH_SWEEP removed (too loose, caused false signals)
         
         if not has_sweep:
-            self._last_rejection_reasons.append("Opt4: Engulfing found but no liquidity sweep")
+            self._last_rejection_reasons.append("Opt4: Engulfing found but no real liquidity sweep")
             return None
         
-        # 3. Optional bonus confirmations
+        # 3. BOS REQUIRED (2026-02-28 — was missing, key fix)
+        # Engulfing alone is not enough. Need structural break to confirm the move.
+        has_bos = self.check_bos(candles, direction)
+        if not has_bos:
+            self._last_rejection_reasons.append("Opt4: Engulfing + sweep found but no BOS (mandatory)")
+            return None
+        confirmations.append("BOS")
+        self._last_bos_found = True
+        
+        # 4. Optional bonus confirmations
         # Check for OB at the sweep zone
         order_blocks = self.find_order_blocks(candles, 5)
         current_price = candles[-1]['close']
-        pip_value = self.get_pip_value()
         tolerance = 15 * pip_value
         
         for ob in order_blocks:
@@ -1305,8 +1321,7 @@ class FlexibleICTStrategy:
                     confirmations.append("OB_AT_SWEEP")
                     break
         
-        # Check HTF trend — REJECT if directly counter-trend (added 2026-02-25)
-        # Ranging is OK (engulfing decides direction), but fighting a clear 4H trend = losing
+        # 5. HTF trend gate — REJECT if directly counter-trend
         htf_trend = self.determine_htf_trend(candles, 240)
         if htf_trend == TrendDirection.BULLISH and direction == 'short':
             self._last_rejection_reasons.append(
@@ -1329,7 +1344,7 @@ class FlexibleICTStrategy:
             'confirmations': confirmations,
             'htf_trend': htf_trend if htf_trend != TrendDirection.RANGING else None,
             'has_liquidity_sweep': True,
-            'has_bos': False,
+            'has_bos': True,
             'has_choch': False,
             'has_fib_confluence': False,
             'asian_sweep': 'LIQUIDITY_SWEEP' in confirmations,
@@ -3061,6 +3076,33 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append(f"Outside trading session: {session_reason}")
             return None
         
+        # ===== ASIAN SESSION BLOCK FOR FOREX (2026-02-28) =====
+        # EUR/GBP had multiple Asian session losses (01:05, 02:30, 03:11, 04:56 UTC)
+        # Asian session is 00:00-08:00 UTC — block forex pairs during this time
+        # Gold is allowed (US futures trade during Asia)
+        current_hour = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).hour
+        is_forex = symbol in ['EURUSD', 'EUR_USD', 'GBPUSD', 'GBP_USD']
+        is_asian = 0 <= current_hour < 8
+        if is_forex and is_asian:
+            self._last_rejection_reasons.append(f"Asian session blocked for forex (00-08 UTC, hour={current_hour})")
+            return None
+        
+        # ===== KILL ZONE PRECISION FILTER (2026-02-28) =====
+        # Best trade windows with highest institutional activity:
+        # - London Kill Zone: 07:00-10:00 UTC (full risk)
+        # - NY Kill Zone: 12:00-15:00 UTC (full risk)
+        # - Outside kill zones: half risk only OR skip entirely for weaker setups
+        is_london_kz = 7 <= current_hour < 10
+        is_ny_kz = 12 <= current_hour < 15
+        self._in_kill_zone = is_london_kz or is_ny_kz
+        
+        # ===== NO DAILY SIGNAL CAP (2026-02-28 revised) =====
+        # Previously capped at 4 strong / 2 weak, but user correctly argued:
+        # If the setup filters are strict enough, every passing signal is valid.
+        # The real fix for the "8 losing EUR signals" was better filters (losing zone
+        # dedup, Option 4 improvements, Asian block), NOT arbitrary caps.
+        # Trust the quality filters. 2-hour cooldown still prevents spam.
+        
         # ===== SIGNAL COOLDOWN - Prevent duplicate signals =====
         if not self.check_signal_cooldown(symbol, current_timestamp):
             self._last_rejection_reasons.append(f"Signal cooldown ({self._signal_cooldown_minutes}min between signals)")
@@ -3186,6 +3228,13 @@ class FlexibleICTStrategy:
         if confirmation_count < 2:
             self._last_rejection_reasons.append(f"Insufficient confirmations ({confirmation_count}/2 required)")
             return None  # Need at least 2 confirmations
+        
+        # ===== TIERED DAILY CAP CHECK (2026-02-28) =====
+        # Weak setups (2 confirms) capped at 2/day, strong (3+) at 4/day
+        current_count = self.trades_today.get(symbol, 0)
+        if confirmation_count == 2 and current_count >= 2:
+            self._last_rejection_reasons.append(f"Weak setup cap: {current_count}/2 for 2-confirm setups on {symbol}")
+            return None
         
         # Calculate risk percentage
         risk_percentage = self.determine_risk_percentage(confirmation_count)

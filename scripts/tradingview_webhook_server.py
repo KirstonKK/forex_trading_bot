@@ -633,6 +633,50 @@ def webhook():
                         except Exception as e:
                             logger.warning(f"Could not record losing zone: {e}")
                     
+                    # ===== ML FEEDBACK LOOP (2026-02-28) =====
+                    # Log resolved trade outcome to ML model for training data collection
+                    if ML_RISK_AVAILABLE and get_ml_risk_model:
+                        try:
+                            ml_model = get_ml_risk_model()
+                            # Reconstruct signal data from trade record
+                            signal_data = {
+                                'setup_type': setup,
+                                'direction': direction,
+                                'confirmations': trade.get('confirmations', []),
+                                'confidence': trade.get('confidence', 0.7),
+                            }
+                            # Build market context
+                            trade_hour = 12  # Default
+                            try:
+                                exit_time = trade.get('exit_time', '')
+                                if exit_time:
+                                    trade_hour = datetime.fromisoformat(exit_time.replace('Z', '+00:00')).hour
+                            except Exception:
+                                pass
+                            market_context = {
+                                'session': 'LONDON' if 8 <= trade_hour < 12 else ('NY' if 12 <= trade_hour < 17 else 'OFF'),
+                                'hour': trade_hour,
+                                'symbol': symbol,
+                            }
+                            ml_model.log_trade_outcome(signal_data, market_context, outcome, pips)
+                            logger.info(f"🤖 ML logged: {outcome} ({pips:+.1f} pips) for {setup}")
+                        except Exception as e:
+                            logger.warning(f"ML feedback error: {e}")
+                    
+                    # ===== A/B TESTING FEEDBACK (2026-02-28) =====
+                    # Record outcome for all A/B variants that would have taken this signal
+                    if AB_TESTING_AVAILABLE and get_ab_framework:
+                        try:
+                            ab_framework = get_ab_framework()
+                            # Get stored variant results for this signal
+                            sig = active_signals.get(sig_id, {})
+                            variant_results = sig.get('ab_variant_results', {})
+                            if variant_results:
+                                ab_framework.record_signal_result(variant_results, outcome, pips)
+                                logger.info(f"🔬 A/B recorded: {outcome} for {len([v for v in variant_results.values() if v])} variants")
+                        except Exception as e:
+                            logger.warning(f"A/B testing feedback error: {e}")
+                    
                     verify_tag = "🔍 VERIFIED" if verified else "⚠️ UNVERIFIED"
                     
                     tg_text = (
@@ -766,6 +810,28 @@ def webhook():
                 # Normalize signal structure for frontend
                 signal['type'] = signal['direction']
                 signal['entry'] = signal['entry_price']
+                
+                # ===== A/B TESTING EVALUATION (2026-02-28) =====
+                # Evaluate which variants would have taken this signal
+                # Store results with the signal for later outcome recording
+                ab_variant_results = {}
+                if AB_TESTING_AVAILABLE and get_ab_framework:
+                    try:
+                        ab_framework = get_ab_framework()
+                        # Determine if signal has ChoCH and 15M confirmation
+                        has_choch = signal.get('has_choch', False) or 'CHOCH' in confirmations
+                        has_15m_confirm = True  # If we got here, 15M confirmed (it's a filter)
+                        confidence = signal.get('confidence', 0.7)
+                        
+                        ab_variant_results = ab_framework.evaluate_setup(
+                            choch_found=has_choch,
+                            confirmation_15m=has_15m_confirm,
+                            confidence=confidence
+                        )
+                        signal['ab_variant_results'] = ab_variant_results
+                        logger.info(f"🔬 A/B: {sum(ab_variant_results.values())}/{len(ab_variant_results)} variants matched")
+                    except Exception as e:
+                        logger.warning(f"A/B evaluation error: {e}")
                 
                 # Store signal in history for dashboard
                 new_signal_id = add_signal_to_history(signal, symbol)
