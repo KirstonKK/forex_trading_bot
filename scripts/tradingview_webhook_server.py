@@ -622,6 +622,12 @@ def webhook():
                     if outcome == 'win':
                         emoji = "✅"
                         msg = f"🎯 TP HIT — +{pips:.1f} pips (RR {rr:.1f})"
+                        # Reset consecutive loss counter on win
+                        try:
+                            strategy.record_win(symbol)
+                            logger.info(f"📝 Recorded win — consecutive loss counter reset")
+                        except Exception as e:
+                            logger.warning(f"Could not record win: {e}")
                     else:
                         emoji = "❌"
                         msg = f"🛑 SL HIT — {pips:.1f} pips"

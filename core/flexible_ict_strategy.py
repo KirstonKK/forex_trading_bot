@@ -140,6 +140,20 @@ class FlexibleICTStrategy:
         # EUR kept shorting ~1.178x-1.180x and losing each time; this blocks that
         self._recent_losses = {}  # {'EUR_USD': [{'price': 1.1797, 'direction': 'short', 'time': ts}]}
         
+        # Consecutive loss circuit breaker (added 2026-03-03)
+        # After 3 consecutive losses, pause trading for 4 hours to avoid tilt/drawdown spirals
+        # The 12-loss streak on Feb 24-26 lost -527 pips — this would have capped it at ~3-4 losses
+        self._consecutive_losses = 0
+        self._max_consecutive_losses = 3  # Pause after 3 consecutive losses
+        self._circuit_breaker_until = 0   # Unix timestamp when circuit breaker expires
+        self._circuit_breaker_hours = 4   # Hours to pause after hitting limit
+        
+        # Daily loss counter (added 2026-03-03)
+        # Hard stop after 5 losses in a day — Feb 24 had 6 losses in one day
+        self._daily_losses = 0
+        self._daily_loss_limit = 5
+        self._daily_loss_date = None
+        
         # All market data for correlated pair access (SMT divergence)
         self._all_market_data = {}  # {'EUR_USD': {'5M': [...], '1H': [...]}, 'GBP_USD': {...}}
         
@@ -183,10 +197,16 @@ class FlexibleICTStrategy:
                 self._recent_signals = state.get('recent_signals', {})
                 # Restore recent losses for zone dedup
                 self._recent_losses = state.get('recent_losses', {})
+                # Restore circuit breaker state
+                self._consecutive_losses = state.get('consecutive_losses', 0)
+                self._circuit_breaker_until = state.get('circuit_breaker_until', 0)
+                self._daily_losses = state.get('daily_losses', 0)
+                self._daily_loss_date = state.get('daily_loss_date', None)
                 import logging
                 logging.getLogger('strategy').info(
                     f"📂 Loaded signal state: cooldowns={list(self._last_signal_time.keys())}, "
-                    f"trades_today={self.trades_today}"
+                    f"trades_today={self.trades_today}, consec_losses={self._consecutive_losses}, "
+                    f"daily_losses={self._daily_losses}"
                 )
         except Exception as e:
             import logging
@@ -201,7 +221,11 @@ class FlexibleICTStrategy:
                 'trades_today': self.trades_today,
                 'current_date': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
                 'recent_signals': self._recent_signals,
-                'recent_losses': self._recent_losses
+                'recent_losses': self._recent_losses,
+                'consecutive_losses': self._consecutive_losses,
+                'circuit_breaker_until': self._circuit_breaker_until,
+                'daily_losses': self._daily_losses,
+                'daily_loss_date': self._daily_loss_date
             }
             with open(self._STATE_FILE, 'w') as f:
                 json.dump(state, f, indent=2)
@@ -296,7 +320,10 @@ class FlexibleICTStrategy:
         """
         Record a losing trade's price level so we don't re-enter the same zone.
         Called when a trade hits SL.
+        Also updates consecutive loss counter and daily loss counter.
         """
+        import logging
+        _log = logging.getLogger('strategy')
         ts = timestamp or int(datetime.now(timezone.utc).timestamp())
         if symbol not in self._recent_losses:
             self._recent_losses[symbol] = []
@@ -307,7 +334,60 @@ class FlexibleICTStrategy:
         })
         # Keep only last 5 losses per symbol
         self._recent_losses[symbol] = self._recent_losses[symbol][-5:]
+        
+        # Update consecutive loss counter
+        self._consecutive_losses += 1
+        if self._consecutive_losses >= self._max_consecutive_losses:
+            self._circuit_breaker_until = ts + (self._circuit_breaker_hours * 3600)
+            _log.warning(
+                f"🚨 CIRCUIT BREAKER: {self._consecutive_losses} consecutive losses — "
+                f"pausing for {self._circuit_breaker_hours}h until "
+                f"{datetime.fromtimestamp(self._circuit_breaker_until, tz=timezone.utc).strftime('%H:%M UTC')}")
+        
+        # Update daily loss counter
+        today = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%Y-%m-%d')
+        if self._daily_loss_date != today:
+            self._daily_losses = 0
+            self._daily_loss_date = today
+        self._daily_losses += 1
+        if self._daily_losses >= self._daily_loss_limit:
+            _log.warning(
+                f"🛑 DAILY LOSS LIMIT: {self._daily_losses} losses today — no more trades until tomorrow")
+        
         self._save_state()
+    
+    def record_win(self, symbol: str = None):
+        """
+        Record a winning trade. Resets consecutive loss counter.
+        Called when a trade hits TP.
+        """
+        self._consecutive_losses = 0
+        self._save_state()
+    
+    def check_circuit_breaker(self, timestamp: int) -> bool:
+        """
+        Check if circuit breaker is active (too many consecutive losses).
+        Returns True if trading is BLOCKED.
+        """
+        # Check consecutive loss circuit breaker
+        if self._consecutive_losses >= self._max_consecutive_losses:
+            if timestamp < self._circuit_breaker_until:
+                return True
+            else:
+                # Circuit breaker expired, reset
+                self._consecutive_losses = 0
+                self._circuit_breaker_until = 0
+        
+        # Check daily loss limit
+        today = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d')
+        if self._daily_loss_date == today and self._daily_losses >= self._daily_loss_limit:
+            return True
+        elif self._daily_loss_date != today:
+            # New day, reset
+            self._daily_losses = 0
+            self._daily_loss_date = today
+        
+        return False
     
     def check_losing_zone(self, symbol: str, entry_price: float, direction: str, timestamp: int) -> bool:
         """
@@ -1215,21 +1295,38 @@ class FlexibleICTStrategy:
         """
         Option 4: Liquidity Sweep + Engulfing Confirmation
         
-        Simple but effective price action setup:
-        1. Price sweeps a liquidity zone on 5M (equal lows/highs or session lows/highs)
-        2. 15M engulfing candle confirms reversal
-        3. Enter on the close of the engulfing candle
+        HARDENED (2026-03-03) — was 10% WR (1W/9L = -765 pips). Root causes:
+          a) No BOS requirement → engulfing alone isn't enough
+          b) Counter-trend trades passing when HTF=none/ranging  
+          c) XAU_USD was 0/7 — gold is too volatile for this pattern
+          d) Absurd RR targets (8:1, 15:1) never reached
+          e) 3rd fallback (SWING_LOW_SWEEP) too loose — catches noise
         
-        SL: Below/above the swept liquidity level
-        TP: 2x risk (1:2 R:R)
-        
-        This catches setups like:
-        - Asian session low sweep → London bullish engulfing → Buy
-        - Previous session high sweep → bearish engulfing → Sell
+        Fixes applied:
+          1. BLOCK gold entirely — 0% WR on XAU, pattern doesn't work
+          2. Require HTF ALIGNMENT (not just "not counter-trend") — ranging = skip
+          3. Require BOS after sweep (structural confirmation, not just engulfing)
+          4. Remove weak 3rd-try sweep fallback (SWING_LOW/HIGH_SWEEP)
+          5. Require minimum 3 confirmations (was 2)
         """
         import logging
         _log = logging.getLogger('strategy')
         confirmations = []
+        
+        # GATE 0: Block gold — 0/7 on this setup, pattern doesn't work for XAU
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        if is_gold:
+            self._last_rejection_reasons.append("Opt4: Gold excluded (0% WR historically)")
+            return None
+        
+        # GATE 1: Check HTF trend FIRST — must be aligned, ranging = skip
+        # Previously: only blocked explicit counter-trend, let ranging through
+        # Data showed: ranging HTF + engulfing = coinflip, not an edge
+        htf_trend = self.determine_htf_trend(candles, 240)
+        if htf_trend == TrendDirection.RANGING or htf_trend is None:
+            self._last_rejection_reasons.append(
+                f"Opt4: HTF ranging/unclear — need aligned trend for engulfing setup")
+            return None
         
         # 1. Check for engulfing candle on 15M (the trigger)
         engulfing = self.detect_engulfing(candles, timeframe=15)
@@ -1238,7 +1335,19 @@ class FlexibleICTStrategy:
             return None
         
         direction = engulfing['direction']
+        
+        # Verify HTF alignment with engulfing direction
+        if htf_trend == TrendDirection.BULLISH and direction == 'short':
+            self._last_rejection_reasons.append(
+                f"Opt4: Counter-trend rejected (4H=bullish, engulfing=short)")
+            return None
+        if htf_trend == TrendDirection.BEARISH and direction == 'long':
+            self._last_rejection_reasons.append(
+                f"Opt4: Counter-trend rejected (4H=bearish, engulfing=long)")
+            return None
+        
         confirmations.append("15M_ENGULFING")
+        confirmations.append("HTF_ALIGNED")
         
         # 2. Check for liquidity sweep on 5M
         # First try: check if Asian range or session lows/highs were swept
@@ -1268,30 +1377,24 @@ class FlexibleICTStrategy:
                     self._last_sweep_found = True
                     has_sweep = True
         
-        # Third try: just check if price made a new low/high and reversed
-        if not has_sweep:
-            recent = candles[-20:]
-            if direction == 'long':
-                lowest = min(c['low'] for c in recent)
-                # Did recent candles sweep the low and recover?
-                last_3 = candles[-3:]
-                swept_and_recovered = any(c['low'] <= lowest * 1.0001 for c in last_3) and candles[-1]['close'] > lowest
-                if swept_and_recovered:
-                    confirmations.append("SWING_LOW_SWEEP")
-                    has_sweep = True
-            else:
-                highest = max(c['high'] for c in recent)
-                last_3 = candles[-3:]
-                swept_and_recovered = any(c['high'] >= highest * 0.9999 for c in last_3) and candles[-1]['close'] < highest
-                if swept_and_recovered:
-                    confirmations.append("SWING_HIGH_SWEEP")
-                    has_sweep = True
+        # REMOVED: Third try (SWING_LOW/HIGH_SWEEP) — too loose, catches noise
+        # This was responsible for many false signals where there was no real sweep
         
         if not has_sweep:
             self._last_rejection_reasons.append("Opt4: Engulfing found but no liquidity sweep")
             return None
         
-        # 3. Optional bonus confirmations
+        # 3. MANDATORY: BOS after sweep (added 2026-03-03)
+        # Engulfing alone doesn't prove the sweep reversed structure.
+        # Need a break of structure to confirm the reversal is real.
+        has_bos = self.check_bos(candles, direction)
+        if not has_bos:
+            self._last_rejection_reasons.append("Opt4: No BOS after sweep (mandatory — engulfing alone insufficient)")
+            return None
+        confirmations.append("BOS")
+        self._last_bos_found = True
+        
+        # 4. Optional bonus confirmations
         # Check for OB at the sweep zone
         order_blocks = self.find_order_blocks(candles, 5)
         current_price = candles[-1]['close']
@@ -1305,21 +1408,11 @@ class FlexibleICTStrategy:
                     confirmations.append("OB_AT_SWEEP")
                     break
         
-        # Check HTF trend — REJECT if directly counter-trend (added 2026-02-25)
-        # Ranging is OK (engulfing decides direction), but fighting a clear 4H trend = losing
-        htf_trend = self.determine_htf_trend(candles, 240)
-        if htf_trend == TrendDirection.BULLISH and direction == 'short':
+        # 5. Minimum confirmation gate
+        if len(confirmations) < 3:
             self._last_rejection_reasons.append(
-                f"Opt4: Counter-trend rejected (4H=bullish, engulfing=short)")
+                f"Opt4: Only {len(confirmations)}/3 confirmations ({', '.join(confirmations)})")
             return None
-        if htf_trend == TrendDirection.BEARISH and direction == 'long':
-            self._last_rejection_reasons.append(
-                f"Opt4: Counter-trend rejected (4H=bearish, engulfing=long)")
-            return None
-        if htf_trend == TrendDirection.BULLISH and direction == 'long':
-            confirmations.append("HTF_ALIGNED")
-        elif htf_trend == TrendDirection.BEARISH and direction == 'short':
-            confirmations.append("HTF_ALIGNED")
         
         _log.info(f"✅ [{symbol}] Option 4 HIT: {direction} - {confirmations}")
         
@@ -1327,9 +1420,9 @@ class FlexibleICTStrategy:
             'setup_type': SetupType.OPTION_4,
             'direction': direction,
             'confirmations': confirmations,
-            'htf_trend': htf_trend if htf_trend != TrendDirection.RANGING else None,
+            'htf_trend': htf_trend,
             'has_liquidity_sweep': True,
-            'has_bos': False,
+            'has_bos': True,
             'has_choch': False,
             'has_fib_confluence': False,
             'asian_sweep': 'LIQUIDITY_SWEEP' in confirmations,
@@ -2883,6 +2976,16 @@ class FlexibleICTStrategy:
         else:
             min_rr_floor = 2.0   # Forex floor
         
+        # Setup-specific MAX RR caps (added 2026-03-03)
+        # LIQ_SWEEP_ENGULF was hitting 8:1 and 15:1 targets that never filled
+        # Cap it to 3:1 max — engulfing setups don't have the momentum for big runs
+        setup_max_rr = {
+            'LIQ_SWEEP_ENGULF': 3.0,   # Was 8-15, never filled. Cap to 3:1
+            'ICT_SWEEP_CONFIRM': 5.0,   # Cap at 5:1 (good setups but not unlimited)
+            'ZONE_OB_FIB_SWEEP': 5.0,   # Same
+        }
+        max_rr_for_setup = setup_max_rr.get(setup_type, 999.0)  # No cap for HTF_LIQUIDITY_BOS
+        
         # Get 5M and 1H candles for DOL search
         candles_5m = self.mtf_data.get('5M', candles) if self.mtf_data else candles
         candles_1h = self.mtf_data.get('1H', []) if self.mtf_data else []
@@ -2943,6 +3046,16 @@ class FlexibleICTStrategy:
                     chosen_target = capped_targets[0]
                 
                 if chosen_target:
+                    # Apply setup-specific max RR cap
+                    if chosen_target['rr'] > max_rr_for_setup:
+                        capped_dist = sl_distance * max_rr_for_setup
+                        if direction == 'long':
+                            chosen_target['price'] = entry + capped_dist
+                        else:
+                            chosen_target['price'] = entry - capped_dist
+                        _log.info(
+                            f"📏 [{symbol}] Capped {setup_type} RR from 1:{chosen_target['rr']} to 1:{max_rr_for_setup}")
+                        chosen_target['rr'] = max_rr_for_setup
                     take_profit = chosen_target['price']
                     _log.info(
                         f"🎯 [{symbol}] Dynamic TP: {take_profit:.5f} "
@@ -3075,6 +3188,17 @@ class FlexibleICTStrategy:
         
         _log.info(f"📊 [{symbol}] Passed session/news filters — analyzing setups... (price: {base_candles[-1]['close']:.5f})")
         
+        # ===== CIRCUIT BREAKER — consecutive loss / daily loss limit =====
+        if not backtest_mode and self.check_circuit_breaker(current_timestamp):
+            remaining = ''
+            if self._circuit_breaker_until > current_timestamp:
+                mins_left = (self._circuit_breaker_until - current_timestamp) / 60
+                remaining = f' ({mins_left:.0f}min remaining)'
+            self._last_rejection_reasons.append(
+                f"Circuit breaker active: {self._consecutive_losses} consecutive losses / "
+                f"{self._daily_losses} daily losses{remaining}")
+            return None
+        
         # Daily housekeeping (reset counters on new day)
         self.can_take_trade(current_timestamp, symbol)
         
@@ -3086,38 +3210,29 @@ class FlexibleICTStrategy:
         #
         # Legacy Options 2 & 3 are REPLACED by Option 6 (corrected consolidation).
         # Original try_option_2/try_option_3 methods kept for reference but NOT called.
+        # Priority rebalanced 2026-03-03 based on BACKTEST results:
+        #   LIQ_SWEEP_ENGULF:  58.8% WR, +156 pips, +15.2R — BEST after hardening
+        #   HTF_LIQUIDITY_BOS: 30.8% WR — solid backbone, always #2
+        #   ICT_SWEEP_CONFIRM: 0/1 — demoted, needs more data
+        #   ZONE_OB_FIB_SWEEP: 0/3 — demoted, taking counter-trend trades
+        #
+        # Top 2 (Opt4 + Opt1) must ALWAYS be prioritized.
+        # Gold: Opt4 blocked (0% WR on gold), so Opt1 leads.
         if 'XAU' in symbol:
-            # Gold: HTF bias works best for trend continuation
+            # Gold: LIQ_SWEEP_ENGULF blocked inside try_option_4 (0/7 on gold)
+            # HTF_LIQUIDITY_BOS is the only reliable gold setup
             options = [
-                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
-                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF (100% WR)
-                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM (full ICT)
-                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (corrected Opt 2+3)
-            ]
-        elif 'GBP' in symbol:
-            # GBP pairs: Option 5 first (full ICT, rare but high quality),
-            # then Option 6 (57% WR, 2.15 PF — best confirmed backtest on GBP),
-            # then Options 1 & 4 as fallback
-            options = [
-                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — PRIORITY for GBP
-                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (57% WR, 2.15 PF on GBP)
-                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
-                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF (100% WR)
-                # --- LEGACY (replaced by Option 6) ---
-                # lambda c, s=symbol: self.try_option_2(c, s),        # HTF_ZONE_OB_CHOCH — 0% WR (fixed in Opt 6)
-                # lambda c: self.try_option_3(c),                     # OB_FVG_FIB — 20% WR (fixed in Opt 6)
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #1 for gold
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM
+                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP
             ]
         else:
-            # EURUSD (and other forex): Option 4 prioritized — simple,
-            # 100% WR, catches the classic Asian sweep → London engulfing
+            # EUR & GBP: Hardened Opt4 first (58.8% WR), then Opt1 (backbone)
             options = [
-                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — PRIORITY for EU
-                self.try_option_1,                                    # HTF_LIQUIDITY_BOS (50% WR)
-                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM (full ICT)
-                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP (corrected Opt 2+3)
-                # --- LEGACY (replaced by Option 6) ---
-                # lambda c, s=symbol: self.try_option_2(c, s),        # HTF_ZONE_OB_CHOCH — 0% WR (fixed in Opt 6)
-                # lambda c: self.try_option_3(c),                     # OB_FVG_FIB — 20% WR (fixed in Opt 6)
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1 (58.8% WR, +15.2R)
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM
+                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP
             ]
         
         setup_data = None
