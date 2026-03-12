@@ -15,7 +15,7 @@ Environment Variables:
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from connectors.mt5_connector import MT5Connector
 from core.legacy.smc_strategy import SMCStrategy
@@ -66,9 +66,10 @@ class LiveTradingBot:
         account_balance = self.mt5.get_account_balance()
         self.risk_manager = EnhancedRiskManager(
             account_balance=account_balance,
-            risk_per_trade=0.01,  # 1%
-            daily_loss_limit=0.015,  # 1.5%
-            weekly_loss_limit=0.03   # 3%
+            risk_per_trade=1.0,  # 1%
+            max_daily_loss=1.5,  # 1.5%
+            max_weekly_loss=3.0,
+            max_trades_per_day=2
         )
         
         # Initialize trade journal
@@ -152,13 +153,17 @@ class LiveTradingBot:
             
             # Validate trade with risk manager
             current_balance = self.mt5.get_account_balance()
-            is_valid = self.risk_manager.validate_trade(
-                symbol=symbol,
+            trade_checks = self.risk_manager.can_open_trade()
+            if not all(trade_checks.values()):
+                logger.warning(f"Risk gate blocked trade for {symbol}: {trade_checks}")
+                return False
+
+            validation = self.risk_manager.validate_trade(
                 entry_price=signal['entry_price'],
                 stop_loss=signal['stop_loss'],
-                take_profit=signal['take_profit'],
-                current_balance=current_balance
+                target_price=signal['take_profit']
             )
+            is_valid = all(validation.values())
             
             if not is_valid:
                 logger.warning(f"Trade validation failed for {symbol}")
@@ -168,7 +173,7 @@ class LiveTradingBot:
             position_risk = self.risk_manager.calculate_position_size(
                 entry_price=signal['entry_price'],
                 stop_loss=signal['stop_loss'],
-                current_balance=current_balance
+                symbol=symbol
             )
             
             # Get symbol info for contract size
@@ -198,18 +203,19 @@ class LiveTradingBot:
                 return False
             
             # Record in journal
-            self.journal.log_trade(
-                symbol=symbol,
-                direction=signal['direction'],
-                entry_price=signal['entry_price'],
-                stop_loss=signal['stop_loss'],
-                take_profit=signal['take_profit'],
-                position_size=volume,
-                entry_pattern=signal.get('pattern', 'SMC'),
-                bos_strength=signal.get('bos_strength', 0),
-                signal_strength=signal.get('signal_strength', 0),
-                status='open'
-            )
+            self.journal.log_trade({
+                'id': f"{symbol}_{int(time.time())}",
+                'symbol': symbol,
+                'entry_time': datetime.now(timezone.utc).isoformat(),
+                'entry_price': signal['entry_price'],
+                'stop_loss': signal['stop_loss'],
+                'take_profit': signal['take_profit'],
+                'quantity': volume,
+                'status': 'open',
+                'entry_zone_type': signal.get('pattern', 'SMC'),
+                'bos_strength': signal.get('bos_strength', 0),
+                'signal_strength': signal.get('signal_strength', 0),
+            })
             
             # Track position
             self.open_positions[symbol] = {

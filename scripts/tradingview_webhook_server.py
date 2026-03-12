@@ -20,10 +20,10 @@ import logging
 import json
 import requests
 from typing import Dict, List
+import time
 
 # Import strategy only (no broker connectors)
 from core.flexible_ict_strategy import FlexibleICTStrategy
-from core.enhanced_risk_manager import EnhancedRiskManager
 from integrations.news_filter import is_reduced_liquidity_day
 
 # Import PulseGraph advisory integration
@@ -129,33 +129,238 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
+
+def normalize_symbol(symbol: str) -> str:
+    """Normalize symbol to underscore format (e.g. EURUSD -> EUR_USD)."""
+    if not symbol:
+        return symbol
+    clean = symbol.replace('/', '_').upper()
+    if '_' not in clean and len(clean) == 6:
+        clean = f"{clean[:3]}_{clean[3:]}"
+    return clean
+
+
+_ML_STATS_CACHE = {
+    'loaded_at': 0.0,
+    'file_mtime': 0.0,
+    'stats': None,
+}
+
+
+def _refresh_ml_stats_cache(force: bool = False) -> None:
+    """Refresh ML historical stats cache from active_signals.json with TTL + mtime checks."""
+    signals_file = os.path.join(BASE_DIR, 'data', 'active_signals.json')
+    now = time.time()
+    ttl_seconds = 60
+
+    try:
+        mtime = os.path.getmtime(signals_file) if os.path.exists(signals_file) else 0.0
+    except Exception:
+        mtime = 0.0
+
+    if not force:
+        if (now - _ML_STATS_CACHE['loaded_at']) < ttl_seconds and _ML_STATS_CACHE['file_mtime'] == mtime:
+            return
+
+    default_stats = {
+        'pair_win_rate': {},
+        'hour_win_rate': {},
+        'setup_win_rate': {},
+        'streak': 0,
+    }
+
+    try:
+        if not os.path.exists(signals_file):
+            _ML_STATS_CACHE.update({'loaded_at': now, 'file_mtime': mtime, 'stats': default_stats})
+            return
+
+        with open(signals_file, 'r') as f:
+            raw = json.load(f)
+
+        signals = list(raw.values()) if isinstance(raw, dict) else raw
+        completed = [s for s in signals if s.get('status') in ('win', 'loss')]
+
+        pair_totals = {}
+        pair_wins = {}
+        hour_totals = {}
+        hour_wins = {}
+        setup_totals = {}
+        setup_wins = {}
+
+        for signal in completed:
+            symbol = normalize_symbol(signal.get('symbol', ''))
+            setup = signal.get('setup_type', '')
+            hour = _extract_hour(signal)
+            is_win = 1 if signal.get('status') == 'win' else 0
+
+            if symbol:
+                pair_totals[symbol] = pair_totals.get(symbol, 0) + 1
+                pair_wins[symbol] = pair_wins.get(symbol, 0) + is_win
+
+            if hour >= 0:
+                hour_totals[hour] = hour_totals.get(hour, 0) + 1
+                hour_wins[hour] = hour_wins.get(hour, 0) + is_win
+
+            if setup:
+                setup_totals[setup] = setup_totals.get(setup, 0) + 1
+                setup_wins[setup] = setup_wins.get(setup, 0) + is_win
+
+        streak = 0
+        for signal in reversed(completed):
+            if streak == 0:
+                streak = 1 if signal.get('status') == 'win' else -1
+            elif (streak > 0 and signal.get('status') == 'win') or (streak < 0 and signal.get('status') == 'loss'):
+                streak += 1 if streak > 0 else -1
+            else:
+                break
+
+        stats = {
+            'pair_win_rate': {
+                key: round(pair_wins[key] / pair_totals[key], 3)
+                for key in pair_totals if pair_totals[key] > 0
+            },
+            'hour_win_rate': {
+                key: round(hour_wins[key] / hour_totals[key], 3)
+                for key in hour_totals if hour_totals[key] > 0
+            },
+            'setup_win_rate': {
+                key: round(setup_wins[key] / setup_totals[key], 3)
+                for key in setup_totals if setup_totals[key] > 0
+            },
+            'streak': streak,
+        }
+
+        _ML_STATS_CACHE.update({'loaded_at': now, 'file_mtime': mtime, 'stats': stats})
+    except Exception as e:
+        logger.warning(f"ML stats cache refresh failed: {e}")
+        _ML_STATS_CACHE.update({'loaded_at': now, 'file_mtime': mtime, 'stats': default_stats})
+
+
+# ---------------------------------------------------------------------------
+# Real ATR / Trend helpers for ML market_context
+# ---------------------------------------------------------------------------
+
+def _compute_atr(candles: list, period: int = 14) -> tuple:
+    """
+    Compute ATR (current) and average ATR from candle list.
+
+    Returns (atr, avg_atr) — both in price units.
+    Falls back to (1.0, 1.0) when there isn't enough data.
+    """
+    if not candles or len(candles) < period + 1:
+        return 1.0, 1.0
+
+    true_ranges = []
+    for i in range(1, len(candles)):
+        h = candles[i].get('high', 0)
+        l = candles[i].get('low', 0)
+        prev_c = candles[i - 1].get('close', 0)
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        true_ranges.append(tr)
+
+    if len(true_ranges) < period:
+        return 1.0, 1.0
+
+    # Current ATR = mean of last `period` true-ranges
+    atr = sum(true_ranges[-period:]) / period
+    # Average ATR = mean of ALL true-ranges (longer lookback)
+    avg_atr = sum(true_ranges) / len(true_ranges)
+    # Guard against zero
+    if avg_atr == 0:
+        return 1.0, 1.0
+    return atr, avg_atr
+
+
+def _compute_trend_strength(candles: list, lookback: int = 10) -> float:
+    """
+    Simple trend-strength score from higher-timeframe candles.
+
+    Returns float in [-1, +1]:
+        +1 = strong uptrend (all recent closes rising)
+        -1 = strong downtrend
+         0 = ranging / no data
+    """
+    if not candles or len(candles) < lookback + 1:
+        return 0.0
+
+    recent = candles[-lookback:]
+    ups = 0
+    downs = 0
+    for i in range(1, len(recent)):
+        if recent[i].get('close', 0) > recent[i - 1].get('close', 0):
+            ups += 1
+        elif recent[i].get('close', 0) < recent[i - 1].get('close', 0):
+            downs += 1
+
+    total = ups + downs
+    if total == 0:
+        return 0.0
+    return (ups - downs) / total
+
+
+def _compute_ml_historical_stats(symbol: str, setup_type: str, current_hour: int) -> dict:
+    """
+    Compute real historical win rates from active_signals.json for ML scoring.
+    Returns dict with pair_win_rate, hour_win_rate, setup_win_rate, streak.
+    Falls back to conservative defaults (0.3) if data is unavailable.
+    """
+    default = {'pair_win_rate': 0.3, 'hour_win_rate': 0.3, 'setup_win_rate': 0.3, 'streak': 0}
+    try:
+        _refresh_ml_stats_cache()
+        stats = _ML_STATS_CACHE.get('stats') or {}
+        normalized_symbol = normalize_symbol(symbol)
+
+        return {
+            'pair_win_rate': stats.get('pair_win_rate', {}).get(normalized_symbol, 0.3),
+            'hour_win_rate': stats.get('hour_win_rate', {}).get(current_hour, 0.3),
+            'setup_win_rate': stats.get('setup_win_rate', {}).get(setup_type, 0.3),
+            'streak': stats.get('streak', 0),
+        }
+    except Exception:
+        return default
+
+
+def _extract_hour(signal: dict) -> int:
+    """Extract hour from a signal's timestamp."""
+    try:
+        ts = signal.get('timestamp', signal.get('open_time', ''))
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(ts, tz=timezone.utc).hour
+        if isinstance(ts, str) and ts:
+            return datetime.fromisoformat(ts.replace('Z', '+00:00')).hour
+    except Exception:
+        pass
+    return -1
+
 # Initialize Flask app
 app = Flask(__name__, static_folder=STATIC_DIR)
 
 # Configuration
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
-if not WEBHOOK_SECRET or WEBHOOK_SECRET == 'your_secret_key_here':
-    logger.warning("WARNING: Using default webhook secret. Set WEBHOOK_SECRET environment variable for production!")
-    WEBHOOK_SECRET = 'your_secret_key_here'
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '').strip()
+if not WEBHOOK_SECRET:
+    raise RuntimeError("WEBHOOK_SECRET is required. Set WEBHOOK_SECRET environment variable.")
 
 ACCOUNT_BALANCE = 10000.0
 
 # Telegram configuration
-TELEGRAM_BOT_TOKEN = '8001169647:AAESVk1NjD2ppFUHVDoPq_OamyGHx3gBUU0'
-TELEGRAM_CHAT_ID = '117216462'  # Personal chat
-TELEGRAM_GROUP_ID = '-5005853931'  # Trading Admin group
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '').strip()  # Personal chat
+TELEGRAM_GROUP_ID = os.environ.get('TELEGRAM_GROUP_ID', '').strip()  # Trading Admin group
 
 # Initialize Telegram notifiers (personal + group)
 telegram_notifier = None
 telegram_group_notifier = None
 
-if TELEGRAM_AVAILABLE:
+if TELEGRAM_AVAILABLE and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
     telegram_notifier = init_telegram(bot_token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_CHAT_ID)
-    # Create second notifier for group
-    from integrations.telegram_bot import TelegramNotifier
-    telegram_group_notifier = TelegramNotifier(bot_token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_GROUP_ID)
-    logger.info("✅ Telegram notifications enabled (personal + group)")
+    if TELEGRAM_GROUP_ID:
+        # Create second notifier for group
+        from integrations.telegram_bot import TelegramNotifier
+        telegram_group_notifier = TelegramNotifier(bot_token=TELEGRAM_BOT_TOKEN, chat_id=TELEGRAM_GROUP_ID)
+    logger.info("✅ Telegram notifications enabled")
 else:
+    if TELEGRAM_AVAILABLE:
+        logger.warning("Telegram integration available but TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not configured")
     telegram_notifier = None
 
 # Data persistence paths
@@ -293,12 +498,79 @@ signal_counter = 0
 load_market_data()
 load_signals()
 
+
+def _on_background_trade_resolved(trade: dict):
+    """Callback fired when the background verifier resolves a trade.
+    
+    Syncs active_signals.json and sends Telegram notifications so the user
+    is notified even when the resolution happens outside the webhook path.
+    """
+    sig_id = trade.get('signal_id', '')
+    outcome = trade.get('status', '')
+
+    # ── Update active_signals.json ──
+    if sig_id and sig_id in active_signals:
+        active_signals[sig_id]['status'] = outcome
+        active_signals[sig_id]['exit_price'] = trade.get('exit_price')
+        active_signals[sig_id]['exit_time'] = trade.get('exit_time')
+        active_signals[sig_id]['pips_result'] = trade.get('pips_result')
+        active_signals[sig_id]['rr_achieved'] = trade.get('rr_achieved')
+        save_signals()
+
+    # ── Telegram notification ──
+    symbol = trade.get('symbol', '?')
+    pips = trade.get('pips_result', 0)
+    rr = trade.get('rr_achieved', 0)
+    direction = trade.get('direction', '?')
+    setup = trade.get('setup_type', '?')
+    entry = trade.get('entry_price', 0)
+    exit_p = trade.get('exit_price', 0)
+    verified = trade.get('verified', False)
+    hit_time = trade.get('hit_candle_time', '')
+    candles_checked = trade.get('candles_checked', 0)
+
+    if outcome == 'win':
+        emoji = "✅"
+        msg = f"🎯 TP HIT — +{pips:.1f} pips (RR {rr:.1f})"
+    elif outcome == 'loss':
+        emoji = "❌"
+        msg = f"🛑 SL HIT — {pips:.1f} pips"
+    elif outcome == 'expired':
+        emoji = "⏰"
+        msg = f"Entry {entry:.5f} never reached — limit expired"
+    else:
+        return
+
+    verify_tag = "🔍 VERIFIED" if verified else "⚠️ UNVERIFIED"
+
+    tg_text = (
+        f"{emoji} <b>TRADE {outcome.upper()}: {symbol}</b>\n"
+        f"Setup: {setup} | {direction.upper()}\n"
+        f"Entry: {entry:.5f} → Exit: {exit_p:.5f}\n"
+        f"{msg}\n"
+        f"{verify_tag} against {candles_checked} candles"
+    )
+    if hit_time:
+        tg_text += f"\nHit candle: {hit_time}"
+
+    if telegram_notifier:
+        try:
+            telegram_notifier.send_message(tg_text)
+        except Exception as e:
+            logger.error(f"Background resolve Telegram error: {e}")
+    if telegram_group_notifier:
+        try:
+            telegram_group_notifier.send_message(tg_text)
+        except Exception as e:
+            logger.error(f"Background resolve Telegram group error: {e}")
+
+
 # Sync RECENT pending signals into TradeTracker for TP/SL monitoring.
 # Only sync signals < 4 hours old. The verifier will fetch real price
 # history from yfinance and immediately resolve any that already hit SL/TP.
 # Signals older than 4h are too stale — expire them instead.
 if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
-    tracker = get_trade_tracker()
+    tracker = get_trade_tracker(on_resolve_callback=_on_background_trade_resolved)
     synced = 0
     verified_resolved = 0
     expired = 0
@@ -466,14 +738,6 @@ def convert_to_candles_list(columnar_data):
 # Initialize strategy
 strategy = FlexibleICTStrategy()
 
-# Initialize risk manager
-risk_manager = EnhancedRiskManager(
-    account_balance=ACCOUNT_BALANCE,
-    risk_per_trade=1.0,
-    max_daily_loss=4.0,
-    max_trades_per_day=2
-)
-
 # Initialize PulseGraph advisor (advisory only - does not affect trades)
 sentiment_advisor = None
 if PULSEGRAPH_AVAILABLE:
@@ -495,7 +759,7 @@ def webhook():
     
     Expected JSON from TradingView:
     {
-        "secret": "your_secret_key_here",
+        "secret": "<WEBHOOK_SECRET>",
         "symbol": "EURUSD",
         "timeframe": "5M",
         "time": 1234567890,
@@ -522,9 +786,7 @@ def webhook():
             return jsonify({'error': 'Invalid secret'}), 401
         
         # Extract candle data
-        symbol = data.get('symbol', '').replace('/', '_')  # Convert EURUSD to EUR_USD
-        if len(symbol) == 6:
-            symbol = f"{symbol[:3]}_{symbol[3:]}"
+        symbol = normalize_symbol(data.get('symbol', ''))
         
         timeframe = data.get('timeframe', '5M')
         
@@ -576,7 +838,13 @@ def webhook():
         if candle_close > 0 and TRADE_TRACKER_AVAILABLE and get_trade_tracker:
             try:
                 tracker = get_trade_tracker()
-                resolved = tracker.update_trades(symbol, candle_close, candle_high=candle_high, candle_low=candle_low)
+                resolved = tracker.update_trades(
+                    symbol,
+                    candle_close,
+                    candle_high=candle_high,
+                    candle_low=candle_low,
+                    allow_full_verify=True,
+                )
                 
                 for trade in resolved:
                     # Sync back to active_signals dict
@@ -715,33 +983,35 @@ def webhook():
                 ml_score = None
                 if ML_RISK_AVAILABLE and ml_score_signal:
                     try:
-                        # Build market context for ML
+                        # Build market context for ML from real candle data
                         current_hour = datetime.now(timezone.utc).hour
-                        if 10 <= current_hour < 14:
+                        if 14 <= current_hour < 17:
+                            session = 'OVERLAP' if current_hour < 16 else 'NY'
+                        elif 10 <= current_hour < 14:
                             session = 'LONDON'
-                        elif 14 <= current_hour < 17:
+                        elif 17 <= current_hour < 21:
                             session = 'NY'
                         else:
                             session = 'OFF'
                         
+                        # Compute real ATR from 1H candles
+                        atr_val, avg_atr_val = _compute_atr(mtf_data.get('1H', []), period=14)
+                        # Compute real trend strength from 4H candles
+                        trend_val = _compute_trend_strength(mtf_data.get('4H', []))
+                        
                         market_context = {
                             'session': session,
-                            'atr': 1.0,  # Would calculate from candles
-                            'avg_atr': 1.0,
-                            'trend_strength': 0.5,  # Would calculate from HTF
-                            'historical': {
-                                'pair_win_rate': 0.6,
-                                'hour_win_rate': 0.6,
-                                'setup_win_rate': 0.6,
-                                'streak': 0
-                            }
+                            'atr': atr_val,
+                            'avg_atr': avg_atr_val,
+                            'trend_strength': trend_val,
+                            'historical': _compute_ml_historical_stats(symbol, setup_name, current_hour)
                         }
                         ml_score = ml_score_signal(signal, market_context)
                         
                         # Add ML info to signal
-                        signal['ml_confidence'] = ml_score.get('confidence', 70)
-                        signal['ml_risk_multiplier'] = ml_score.get('risk_multiplier', 1.0)
-                        signal['ml_recommendation'] = ml_score.get('recommendation', 'full_risk')
+                        signal['ml_confidence'] = ml_score.get('confidence', 50)
+                        signal['ml_risk_multiplier'] = ml_score.get('risk_multiplier', 0.5)
+                        signal['ml_recommendation'] = ml_score.get('recommendation', 'half_risk')
                         signal['ml_reasoning'] = ml_score.get('reasoning', [])
                         
                         # Adjust risk based on ML score
@@ -752,6 +1022,24 @@ def webhook():
                         
                     except Exception as e:
                         logger.error(f"ML scoring error: {e}")
+                
+                # ===== ML SKIP GATE (added 2026-03-07) =====
+                # If ML model says 'skip' (confidence < 40%), block the trade entirely.
+                # Data: trades in 'skip' bucket had 4% actual WR — not worth taking.
+                if ml_score and ml_score.get('recommendation') == 'skip':
+                    ml_conf = ml_score.get('confidence', 0)
+                    logger.info(
+                        f"\n🤖 ML BLOCKED: {symbol} {signal.get('direction', '')} "
+                        f"(ML confidence={ml_conf}% → skip)")
+                    logger.info(f"   Reasons: {ml_score.get('reasoning', [])}")
+                    # Record rejection in strategy for tracking
+                    strategy.record_signal_direction(symbol, signal.get('direction', ''), int(datetime.now(timezone.utc).timestamp()))
+                    return jsonify({
+                        'status': 'ml_skip',
+                        'message': f'ML model confidence too low ({ml_conf}%)',
+                        'symbol': symbol,
+                        'ml_score': ml_score
+                    }), 200
                 
                 logger.info(f"\n🎯 SIGNAL DETECTED FOR {symbol}!")
                 logger.info(f"   Setup: {setup_name}")
@@ -1485,7 +1773,7 @@ if __name__ == '__main__':
     print("TRADINGVIEW STRATEGY ANALYZER")
     print("="*70)
     print("Mode: ANALYSIS ONLY (No broker, no real trades)")
-    print("Webhook Secret: " + ("*" * 8) + " (configured)" if WEBHOOK_SECRET and WEBHOOK_SECRET != 'your_secret_key_here' else "WARNING: Using default secret!")
+    print("Webhook Secret: " + ("*" * 8) + " (configured)")
     print(f"PulseGraph Advisory: {'ENABLED' if sentiment_advisor else 'DISABLED (Neo4j not available)'}")
     print(f"\nServer starting on http://localhost:{PORT}")
     print("\nEndpoints:")
@@ -1698,10 +1986,10 @@ if __name__ == '__main__':
                     if text == '/status' or text == '/start':
                         # Get current prices
                         prices = []
-                        for sym in ['EURUSD', 'GBPUSD', 'XAUUSD']:
+                        for sym in ['EURUSD', 'GBPUSD']:
                             if sym in market_data and market_data[sym].get('5M', {}).get('close'):
                                 price = market_data[sym]['5M']['close'][-1]
-                                prices.append(f"  {sym}: {price:.5f}" if sym != 'XAUUSD' else f"  {sym}: {price:.2f}")
+                                prices.append(f"  {sym}: {price:.5f}")
                         
                         prices_text = "\n".join(prices) if prices else "  Collecting data..."
                         
@@ -1730,9 +2018,8 @@ if __name__ == '__main__':
                         response_text = (
                             "📊 <b>Tracked Pairs</b>\n\n"
                             "• EURUSD (6E=F futures)\n"
-                            "• GBPUSD (6B=F futures)\n"
-                            "• XAUUSD (GC=F gold futures)\n\n"
-                            "⚠️ Gold shows futures price (~$30-40 above spot)"
+                            "• GBPUSD (6B=F futures)\n\n"
+                            "ℹ️ XAU_USD removed 2026-03-12 (17.6% WR over 34 trades)"
                         )
                     
                     elif text == '/session':

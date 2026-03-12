@@ -42,6 +42,12 @@ sleep 2
 # Create logs directory
 mkdir -p logs
 
+# Shared webhook secret for server + poller
+if [ -z "$WEBHOOK_SECRET" ]; then
+    echo -e "${RED}❌ WEBHOOK_SECRET is not set. Export WEBHOOK_SECRET before starting.${NC}"
+    exit 1
+fi
+
 # Start webhook server
 echo -e "${GREEN}✓ Starting webhook server (port 5000)...${NC}"
 python scripts/tradingview_webhook_server.py > logs/webhook_startup.log 2>&1 &
@@ -77,9 +83,9 @@ echo "========================================================================"
 echo -e "${GREEN}✓ SYSTEM ONLINE - Fetching Real Market Data${NC}"
 echo "========================================================================"
 echo ""
-echo "📊 Data Source: yfinance (Real futures contracts: 6E=F, 6B=F, 6J=F, 6A=F)"
+echo "📊 Data Source: yfinance (Real futures contracts: 6E=F, 6B=F, GC=F)"
 echo "⏱️  Update Frequency: Every 10 seconds"
-echo "📈 Pairs Tracked: EURUSD, GBPUSD, USDJPY, AUDUSD"
+echo "📈 Pairs Tracked: EURUSD, GBPUSD, XAUUSD"
 echo "🎯 Strategy: ICT/SMC (HTF Structure + Order Blocks + BOS + ChoCH)"
 echo ""
 echo "Endpoints:"

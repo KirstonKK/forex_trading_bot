@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 
+try:
+    from xgboost import XGBClassifier
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBClassifier = None
+    XGBOOST_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Data paths
@@ -199,10 +206,7 @@ class MLRiskModel:
     """
     Machine Learning model for trade risk scoring.
     
-    Uses a simple ensemble approach:
-    1. Logistic regression for baseline
-    2. Decision tree for pattern capture
-    3. Average scores for final prediction
+    Uses XGBoost for non-linear feature interactions and robust ranking.
     
     Outputs confidence score 0-100% used for position sizing.
     """
@@ -213,7 +217,7 @@ class MLRiskModel:
         self.model = None
         self.is_trained = False
         self.training_data: List[Dict] = []
-        self.min_training_samples = 30  # Minimum trades before using ML
+        self.min_training_samples = 20  # Minimum trades before using ML (lowered from 30)
         
         self._load_training_data()
         self._load_model()
@@ -243,8 +247,25 @@ class MLRiskModel:
             if MODEL_FILE.exists():
                 with open(MODEL_FILE, 'rb') as f:
                     self.model = pickle.load(f)
-                self.is_trained = True
-                logger.info("ML risk model loaded")
+                if isinstance(self.model, dict) and self.model.get('model_type') in ('xgboost', 'simple'):
+                    self.is_trained = True
+                    logger.info(f"ML risk model loaded ({self.model.get('model_type')})")
+                elif isinstance(self.model, dict) and 'weights' in self.model:
+                    self.model = {
+                        'model_type': 'simple',
+                        'weights': self.model.get('weights', []),
+                        'bias': self.model.get('bias', 0.5),
+                        'score_mean': self.model.get('score_mean', 0.5),
+                        'score_std': self.model.get('score_std', 0.1),
+                        'win_score_mean': self.model.get('win_score_mean', 0.55),
+                        'loss_score_mean': self.model.get('loss_score_mean', 0.45),
+                        'feature_names': self.feature_extractor.get_feature_names(),
+                    }
+                    self.is_trained = True
+                    logger.info("ML risk model loaded (legacy simple model)")
+                else:
+                    self.is_trained = False
+                    logger.warning("ML model file format not recognized")
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             self.model = None
@@ -319,9 +340,13 @@ class MLRiskModel:
             X = np.array(X)
             y = np.array(y)
             
-            # Simple ensemble: weighted average of predictions
-            # Using basic numpy operations (no sklearn dependency)
-            self.model = self._train_simple_model(X, y)
+            if not XGBOOST_AVAILABLE:
+                return {
+                    'status': 'error',
+                    'message': 'xgboost is required but not installed. Install dependencies from requirements.txt.'
+                }
+
+            self.model = self._train_xgboost_model(X, y)
             self.is_trained = True
             self._save_model()
             
@@ -334,7 +359,8 @@ class MLRiskModel:
                 'samples': len(self.training_data),
                 'accuracy': float(accuracy),
                 'win_rate': float(np.mean(y)),
-                'feature_count': X.shape[1]
+                'feature_count': X.shape[1],
+                'model_type': self.model.get('model_type', 'unknown')
             }
             
             logger.info(f"ML Model trained: {metrics}")
@@ -344,64 +370,76 @@ class MLRiskModel:
             logger.error(f"Training error: {e}")
             return {'status': 'error', 'message': str(e)}
     
-    def _train_simple_model(self, X: np.ndarray, y: np.ndarray) -> Dict:
-        """
-        Train a simple model using numpy (no sklearn dependency).
-        Uses weighted feature averaging based on correlation with outcome.
-        """
-        # Calculate feature weights based on correlation with wins
-        weights = []
-        for i in range(X.shape[1]):
-            # Simple correlation
-            feature_mean = np.mean(X[:, i])
-            outcome_mean = np.mean(y)
-            
-            numerator = np.sum((X[:, i] - feature_mean) * (y - outcome_mean))
-            denominator = np.sqrt(np.sum((X[:, i] - feature_mean) ** 2) * np.sum((y - outcome_mean) ** 2))
-            
-            if denominator > 0:
-                correlation = numerator / denominator
-            else:
-                correlation = 0
-            
-            weights.append(correlation)
-        
-        weights = np.array(weights)
-        
-        # Normalize weights to sum to 1
-        weights = np.abs(weights)
-        if np.sum(weights) > 0:
-            weights = weights / np.sum(weights)
-        else:
-            weights = np.ones(len(weights)) / len(weights)
-        
-        # Calculate bias (overall win rate)
-        bias = np.mean(y)
-        
+    def _train_xgboost_model(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
+        """Train an XGBoost binary classifier and persist full model metadata."""
+        positives = int(np.sum(y == 1))
+        negatives = int(np.sum(y == 0))
+        scale_pos_weight = float(negatives / max(positives, 1)) if positives > 0 else 1.0
+
+        estimator = XGBClassifier(
+            n_estimators=250,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective='binary:logistic',
+            eval_metric='logloss',
+            random_state=42,
+            n_jobs=1,
+            reg_lambda=1.0,
+            min_child_weight=2,
+            scale_pos_weight=scale_pos_weight,
+        )
+        estimator.fit(X, y)
+
+        train_proba = estimator.predict_proba(X)[:, 1]
+
         return {
-            'weights': weights.tolist(),
-            'bias': float(bias),
-            'feature_means': np.mean(X, axis=0).tolist(),
-            'feature_stds': np.std(X, axis=0).tolist()
+            'model_type': 'xgboost',
+            'estimator': estimator,
+            'feature_names': self.feature_extractor.get_feature_names(),
+            'class_balance': {
+                'wins': positives,
+                'losses': negatives,
+            },
+            'train_proba_mean': float(np.mean(train_proba)),
+            'train_proba_std': float(np.std(train_proba)),
+            'trained_at': datetime.utcnow().isoformat(),
         }
     
     def _predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Predict win probability for samples."""
+        """Predict win probability for samples across supported model types."""
         if not self.model:
             return np.full(len(X), 0.5)
-        
-        weights = np.array(self.model['weights'])
-        bias = self.model['bias']
-        
-        # Weighted average of normalized features
-        scores = np.dot(X, weights)
-        
-        # Combine with bias and sigmoid
-        raw_scores = scores + (bias - 0.5) * 0.5
-        probas = 1 / (1 + np.exp(-5 * (raw_scores - 0.5)))  # Sigmoid
-        
-        # Clip to reasonable range
-        return np.clip(probas, 0.1, 0.9)
+
+        model_type = self.model.get('model_type', 'simple') if isinstance(self.model, dict) else 'simple'
+
+        if model_type == 'xgboost':
+            estimator = self.model.get('estimator')
+            if estimator is None:
+                return np.full(len(X), 0.5)
+            probas = estimator.predict_proba(X)[:, 1]
+            return np.clip(probas, 0.10, 0.90)
+
+        if model_type == 'simple':
+            weights = np.array(self.model.get('weights', []), dtype=float)
+            if weights.size == 0:
+                return np.full(len(X), 0.5)
+
+            scores = np.dot(X, weights)
+            score_mean = self.model.get('score_mean', 0.5)
+            win_mean = self.model.get('win_score_mean', score_mean + 0.05)
+            loss_mean = self.model.get('loss_score_mean', score_mean - 0.05)
+
+            spread = max(win_mean - loss_mean, 0.01)
+            midpoint = (win_mean + loss_mean) / 2
+
+            z_scores = (scores - midpoint) / spread
+            probas = 0.5 + z_scores * 0.25
+            probas = 1 / (1 + np.exp(-4 * (probas - 0.5)))
+            return np.clip(probas, 0.10, 0.90)
+
+        return np.full(len(X), 0.5)
     
     def score_signal(self, signal_data: Dict, market_context: Dict = None) -> Dict[str, Any]:
         """
@@ -422,10 +460,10 @@ class MLRiskModel:
         # Default if not trained
         if not self.is_trained or len(self.training_data) < self.min_training_samples:
             return {
-                'confidence': 70,
-                'risk_multiplier': 0.75,
+                'confidence': 50,
+                'risk_multiplier': 0.5,
                 'recommendation': 'half_risk',
-                'reasoning': ['ML model not yet trained - using default'],
+                'reasoning': ['ML model not yet trained - using cautious default'],
                 'ml_active': False
             }
         

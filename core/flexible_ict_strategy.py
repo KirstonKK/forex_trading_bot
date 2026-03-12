@@ -11,14 +11,24 @@ Setup Options:
 6. Zone + OB/FVG + Fib + Sweep (Corrected consolidation of Opt 2+3 — 57% WR on GBP)
 
 Pair-Specific Priority (waterfall — first match wins):
-  EURUSD: Option 4 → Option 1 → Option 5 → Option 6
-  GBPUSD: Option 5 → Option 6 → Option 1 → Option 4
-  Gold:   Option 1 → Option 4 → Option 5 → Option 6
+  EURUSD: Option 4 → Option 1 → Option 5
+  GBPUSD: Option 4 → Option 1 → Option 5
+  Gold:   BLOCKED (17.6% WR over 34 trades, -1755 pips)
 
-Risk Management:
-- 3+ confirmations = full risk (1.0%)
-- 2  confirmations = half risk (0.5%)
-- <2 confirmations = no trade
+DISABLED SETUPS (2026-03-12 data review: 97 resolved trades):
+  Option 6 (ZONE_OB_FIB_SWEEP): 1W/4L = 20% WR, PBO = noise
+  ICT_SWEEP_CONFIRM shorts:     0W/5L = 0% WR (longs 3W/4L = 43% still active)
+
+Risk Management (tightened 2026-03-07, optimized 2026-03-12):
+- Forex: 4+ confirmations = full risk (1.0%), 3 = half risk (0.5%), <3 = no trade
+- Gold: BLOCKED (was 5+/4+ thresholds — entire symbol now disabled)
+- Counter-trend trades HARD BLOCKED
+- Max 3 trades per symbol per day
+- Circuit breaker after 2 consecutive losses
+- Daily loss limit: 3
+- Trading hours: 08-13, 15, 18-19 UTC only (data-driven, was 08-21)
+- RR cap: 5:1 global max (1:5+ had 7.1% WR = 1W/13L)
+- ML skip gate: trades with ML confidence <40 are blocked
 """
 
 import os
@@ -140,19 +150,23 @@ class FlexibleICTStrategy:
         # EUR kept shorting ~1.178x-1.180x and losing each time; this blocks that
         self._recent_losses = {}  # {'EUR_USD': [{'price': 1.1797, 'direction': 'short', 'time': ts}]}
         
-        # Consecutive loss circuit breaker (added 2026-03-03)
-        # After 3 consecutive losses, pause trading for 4 hours to avoid tilt/drawdown spirals
-        # The 12-loss streak on Feb 24-26 lost -527 pips — this would have capped it at ~3-4 losses
+        # Consecutive loss circuit breaker (added 2026-03-03, tightened 2026-03-07)
+        # After 2 consecutive losses, pause trading for 4 hours
+        # Week of Mar 2-6: 9W/28L (24.3% WR) — 3 was too lenient, tightened to 2
         self._consecutive_losses = 0
-        self._max_consecutive_losses = 3  # Pause after 3 consecutive losses
+        self._max_consecutive_losses = 2  # Pause after 2 consecutive losses (was 3)
         self._circuit_breaker_until = 0   # Unix timestamp when circuit breaker expires
         self._circuit_breaker_hours = 4   # Hours to pause after hitting limit
         
-        # Daily loss counter (added 2026-03-03)
-        # Hard stop after 5 losses in a day — Feb 24 had 6 losses in one day
+        # Daily loss counter (added 2026-03-03, tightened 2026-03-07)
+        # Hard stop after 3 losses in a day (was 5)
         self._daily_losses = 0
-        self._daily_loss_limit = 5
+        self._daily_loss_limit = 3  # Was 5 — data showed 5+ losses/day = pure bleed
         self._daily_loss_date = None
+        
+        # Per-symbol daily trade cap (added 2026-03-07)
+        # Max 3 trades per symbol per day — overtrading was a major loss driver
+        self._max_trades_per_symbol = 3
         
         # All market data for correlated pair access (SMT divergence)
         self._all_market_data = {}  # {'EUR_USD': {'5M': [...], '1H': [...]}, 'GBP_USD': {...}}
@@ -178,6 +192,12 @@ class FlexibleICTStrategy:
         #   Forex floor: 1:2 (backtested 60% WR), Gold floor: 1:1.5
         #   No ceiling — DOL confluence determines actual TP
         self.target_rr = 2.0  # Minimum floor for forex (used as reference)
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Normalize pair symbol to no-underscore uppercase format (EUR_USD/EURUSD -> EURUSD)."""
+        if not symbol:
+            return ''
+        return symbol.replace('_', '').replace('/', '').upper()
     
     def _load_state(self):
         """Load signal cooldown and trade state from disk (survives restarts)."""
@@ -275,13 +295,19 @@ class FlexibleICTStrategy:
             'EURUSD': ['GBPUSD'],
             'GBPUSD': ['EURUSD']
         }
-        
-        related = correlated_pairs.get(symbol, [])
+
+        normalized_symbol = self._normalize_symbol(symbol)
+        related = correlated_pairs.get(normalized_symbol, [])
         current_hour = datetime.fromtimestamp(timestamp, tz=timezone.utc).hour
-        
+
+        normalized_recent = {
+            self._normalize_symbol(sym): payload
+            for sym, payload in self._recent_signals.items()
+        }
+
         for related_symbol in related:
-            if related_symbol in self._recent_signals:
-                sig = self._recent_signals[related_symbol]
+            if related_symbol in normalized_recent:
+                sig = normalized_recent[related_symbol]
                 sig_hour = datetime.fromisoformat(sig['time']).hour
                 
                 # If signal within same hour and opposite direction
@@ -292,12 +318,13 @@ class FlexibleICTStrategy:
     
     def record_signal_direction(self, symbol: str, direction: str, timestamp: int = None):
         """Record signal direction for correlation checking and cooldown."""
-        self._recent_signals[symbol] = {
+        normalized_symbol = self._normalize_symbol(symbol)
+        self._recent_signals[normalized_symbol] = {
             'direction': direction,
             'time': datetime.now(timezone.utc).isoformat()
         }
         # Record signal time for cooldown
-        self._last_signal_time[symbol] = timestamp or int(datetime.now(timezone.utc).timestamp())
+        self._last_signal_time[normalized_symbol] = timestamp or int(datetime.now(timezone.utc).timestamp())
     
     def check_signal_cooldown(self, symbol: str, timestamp: int) -> bool:
         """
@@ -306,7 +333,8 @@ class FlexibleICTStrategy:
         
         Returns True if we can signal, False if in cooldown.
         """
-        last_time = self._last_signal_time.get(symbol)
+        normalized_symbol = self._normalize_symbol(symbol)
+        last_time = self._last_signal_time.get(normalized_symbol)
         if last_time is None:
             return True
         
@@ -1319,13 +1347,22 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Opt4: Gold excluded (0% WR historically)")
             return None
         
-        # GATE 1: Check HTF trend FIRST — must be aligned, ranging = skip
-        # Previously: only blocked explicit counter-trend, let ranging through
-        # Data showed: ranging HTF + engulfing = coinflip, not an edge
+        # GATE 1: Check HTF trend — BOTH 4H and 1H must align (tightened 2026-03-07)
+        # Previously: only checked 4H, 0/11 WR this week despite hardening
+        # Adding 1H requirement to catch 4H-agree-but-1H-disagree cases
         htf_trend = self.determine_htf_trend(candles, 240)
+        htf_trend_1h = self.determine_htf_trend(candles, 60)
         if htf_trend == TrendDirection.RANGING or htf_trend is None:
             self._last_rejection_reasons.append(
-                f"Opt4: HTF ranging/unclear — need aligned trend for engulfing setup")
+                f"Opt4: 4H ranging/unclear — need aligned trend for engulfing setup")
+            return None
+        if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
+            self._last_rejection_reasons.append(
+                f"Opt4: 1H ranging/unclear — need both 4H+1H aligned")
+            return None
+        if htf_trend != htf_trend_1h:
+            self._last_rejection_reasons.append(
+                f"Opt4: HTF conflict (4H={htf_trend.value}, 1H={htf_trend_1h.value})")
             return None
         
         # 1. Check for engulfing candle on 15M (the trigger)
@@ -2161,30 +2198,28 @@ class FlexibleICTStrategy:
 
         direction = sweep_info['direction']
 
-        # ====== HTF TREND GATE (mandatory — added 2026-02-25) ======
-        # Without this, Opt5 was taking counter-trend trades and losing badly.
-        # Example: XAU_USD_78 shorted gold when 4H was bullish → instant SL hit.
-        # Rule: sweep direction MUST align with 4H trend. Ranging = allowed (sweep decides).
+        # ====== HTF TREND GATE (mandatory — tightened 2026-03-07) ======
+        # Both 4H and 1H must align with sweep direction. Ranging = blocked.
+        # Previously allowed ranging 4H which produced poor trades.
         htf_trend_4h = self.determine_htf_trend(candles_5m, 240)
         htf_trend_1h = self.determine_htf_trend(candles_5m, 60)
-        if htf_trend_4h == TrendDirection.BULLISH and direction == 'short':
+        if htf_trend_4h == TrendDirection.RANGING or htf_trend_4h is None:
             self._last_rejection_reasons.append(
-                f"Opt5: Counter-trend rejected (4H=bullish, signal=short)")
+                f"Opt5: 4H ranging/unclear — need both 4H+1H aligned")
             return None
-        if htf_trend_4h == TrendDirection.BEARISH and direction == 'long':
+        if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
             self._last_rejection_reasons.append(
-                f"Opt5: Counter-trend rejected (4H=bearish, signal=long)")
+                f"Opt5: 1H ranging/unclear — need both 4H+1H aligned")
             return None
-        # If 4H is ranging but 1H has a clear trend, respect 1H
-        if htf_trend_4h == TrendDirection.RANGING:
-            if htf_trend_1h == TrendDirection.BULLISH and direction == 'short':
-                self._last_rejection_reasons.append(
-                    f"Opt5: Counter-trend rejected (4H=ranging, 1H=bullish, signal=short)")
-                return None
-            if htf_trend_1h == TrendDirection.BEARISH and direction == 'long':
-                self._last_rejection_reasons.append(
-                    f"Opt5: Counter-trend rejected (4H=ranging, 1H=bearish, signal=long)")
-                return None
+        if htf_trend_4h != htf_trend_1h:
+            self._last_rejection_reasons.append(
+                f"Opt5: HTF conflict (4H={htf_trend_4h.value}, 1H={htf_trend_1h.value})")
+            return None
+        if (htf_trend_4h == TrendDirection.BULLISH and direction == 'short') or \
+           (htf_trend_4h == TrendDirection.BEARISH and direction == 'long'):
+            self._last_rejection_reasons.append(
+                f"Opt5: Counter-trend rejected (HTF={htf_trend_4h.value}, signal={direction})")
+            return None
 
         # Sweep level dedup: don't re-try the same sweep level in the same direction
         # Prevents hammering 4x on the same 1H swing low when market is trending against us
@@ -2254,11 +2289,14 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Opt5: Price not at 79% extension (mandatory — 34.5% vs 10% WR)")
             return None
 
-        # Need at least 3 out of 4 confirmations total
+        # Need at least 3 out of 4 confirmations total (mandatory gates already enforce BOS + iFVG + FIB)
         if confirm_count < 3:
             self._last_rejection_reasons.append(
                 f"Opt5: Only {confirm_count}/3 confirmations ({', '.join(confirmations)})")
             return None
+        
+        # HTF alignment confirmation
+        confirmations.append("HTF_4H_1H_ALIGNED")
 
         # ====== STEP 2b: OFF-SESSION FILTER ======
         # Backtest showed OFF_SESSION_MOMENTUM_OK signals were mostly losers.
@@ -2741,17 +2779,29 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Opt6: No BOS or ChoCH (need structural shift)")
             return None
 
-        # ====== STEP 6: HTF TREND ALIGNMENT (MANDATORY) ======
-        # Backtest data: 57% WR with HTF_ALIGNED vs 33% without (GBP)
-        # On EU, nearly all losses were counter-trend — this gate is critical
-        htf_trend = self.determine_htf_trend(candles, 240)
-        if not ((htf_trend == TrendDirection.BULLISH and direction == 'long') or \
-                (htf_trend == TrendDirection.BEARISH and direction == 'short')):
+        # ====== STEP 6: HTF TREND ALIGNMENT (tightened 2026-03-07) ======
+        # Both 4H AND 1H must align — ranging blocked
+        htf_trend_4h = self.determine_htf_trend(candles, 240)
+        htf_trend_1h = self.determine_htf_trend(candles, 60)
+        if htf_trend_4h == TrendDirection.RANGING or htf_trend_4h is None:
             self._last_rejection_reasons.append(
-                f"Opt6: HTF trend not aligned ({htf_trend.value} vs {direction}) — mandatory filter")
+                f"Opt6: 4H ranging/unclear — need both 4H+1H aligned")
+            return None
+        if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
+            self._last_rejection_reasons.append(
+                f"Opt6: 1H ranging/unclear — need both 4H+1H aligned")
+            return None
+        if htf_trend_4h != htf_trend_1h:
+            self._last_rejection_reasons.append(
+                f"Opt6: HTF conflict (4H={htf_trend_4h.value}, 1H={htf_trend_1h.value})")
+            return None
+        if not ((htf_trend_4h == TrendDirection.BULLISH and direction == 'long') or \
+                (htf_trend_4h == TrendDirection.BEARISH and direction == 'short')):
+            self._last_rejection_reasons.append(
+                f"Opt6: Counter-trend ({htf_trend_4h.value} vs {direction}) — blocked")
             return None
 
-        confirmations.append("HTF_ALIGNED")
+        confirmations.append("HTF_4H_1H_ALIGNED")
 
         # ====== BONUS CONFIRMATIONS ======
         # Engulfing at zone (extra confidence)
@@ -2976,15 +3026,20 @@ class FlexibleICTStrategy:
         else:
             min_rr_floor = 2.0   # Forex floor
         
-        # Setup-specific MAX RR caps (added 2026-03-03)
+        # GLOBAL RR CAP (added 2026-03-12) — data shows 1:5+ has only 7.1% WR (1W/13L)
+        # These TPs almost never get hit. Cap everything at 5:1.
+        global_max_rr = 5.0
+        
+        # Setup-specific MAX RR caps (tightened 2026-03-12)
         # LIQ_SWEEP_ENGULF was hitting 8:1 and 15:1 targets that never filled
         # Cap it to 3:1 max — engulfing setups don't have the momentum for big runs
         setup_max_rr = {
             'LIQ_SWEEP_ENGULF': 3.0,   # Was 8-15, never filled. Cap to 3:1
-            'ICT_SWEEP_CONFIRM': 5.0,   # Cap at 5:1 (good setups but not unlimited)
-            'ZONE_OB_FIB_SWEEP': 5.0,   # Same
+            'ICT_SWEEP_CONFIRM': 4.0,   # Cap at 4:1 (was 5:1, tightened)
+            'ZONE_OB_FIB_SWEEP': 4.0,   # Same
+            'HTF_LIQUIDITY_BOS': 5.0,   # Cap at 5:1 (was uncapped)
         }
-        max_rr_for_setup = setup_max_rr.get(setup_type, 999.0)  # No cap for HTF_LIQUIDITY_BOS
+        max_rr_for_setup = min(setup_max_rr.get(setup_type, global_max_rr), global_max_rr)
         
         # Get 5M and 1H candles for DOL search
         candles_5m = self.mtf_data.get('5M', candles) if self.mtf_data else candles
@@ -3091,25 +3146,33 @@ class FlexibleICTStrategy:
         
         return stop_loss, take_profit, rr_ratio
     
-    def determine_risk_percentage(self, confirmation_count: int) -> float:
+    def determine_risk_percentage(self, confirmation_count: int, is_gold: bool = False) -> float:
         """
-        Risk Management: 3 confirmations = 1.0%, 2 = 0.5%, <2 = no trade.
+        Risk Management (tightened 2026-03-07):
+        Forex: 4+ = 1.0%, 3 = 0.5%, <3 = no trade
+        Gold:  5+ = 1.0%, 4 = 0.5%, <4 = no trade (gold is more volatile)
         """
-        risk_map = {3: 1.0, 2: 0.5}
-        return risk_map.get(min(confirmation_count, 3), 0.0)
+        if is_gold:
+            if confirmation_count >= 5:
+                return 1.0
+            elif confirmation_count >= 4:
+                return 0.5
+            return 0.0
+        else:
+            if confirmation_count >= 4:
+                return 1.0
+            elif confirmation_count >= 3:
+                return 0.5
+            return 0.0
     
     def can_take_trade(self, timestamp: int, symbol: str = 'EURUSD') -> bool:
-        """Daily housekeeping — reset counters on new day.
+        """Daily housekeeping + per-symbol cap enforcement.
         
-        Philosophy (updated 2026-02-25):
-        - NO hard daily cap. Trust the quality filters to gate entries:
-          • HTF trend gates (block counter-trend)
-          • Session-hour filter 08:00–21:00 UTC (block Asian junk)
-          • 2-hour cooldown per pair (prevent spam)
-          • Losing-zone dedup (stop re-entering failed zones)
-          • News filter (avoid event-driven chaos)
-        - If 5 quality setups pass all those filters, take all 5.
-        - If only 1 passes, take 1. The filters decide, not a cap.
+        Updated 2026-03-07: Added hard per-symbol daily cap.
+        Data showed overtrading was a major loss driver:
+        - XAU_USD: 0/14 this week (7+ trades/day on some days)
+        - Total: 9W/28L (24.3% WR) — too many low-quality signals
+        Max 3 trades per symbol per day. Quality > quantity.
         """
         current_date = datetime.fromtimestamp(timestamp, tz=timezone.utc).date()
         
@@ -3120,11 +3183,18 @@ class FlexibleICTStrategy:
             self._recent_losses = {}  # Reset losing zones tracker
             self._save_state()
         
+        # Per-symbol daily cap
+        normalized_symbol = self._normalize_symbol(symbol)
+        symbol_trades = self.trades_today.get(normalized_symbol, 0)
+        if symbol_trades >= self._max_trades_per_symbol:
+            return False
+        
         return True
     
     def record_trade(self, symbol: str):
         """Record that a trade was taken for a symbol today."""
-        self.trades_today[symbol] = self.trades_today.get(symbol, 0) + 1
+        normalized_symbol = self._normalize_symbol(symbol)
+        self.trades_today[normalized_symbol] = self.trades_today.get(normalized_symbol, 0) + 1
     
     def analyze(self, candles: List[dict], symbol: str = 'EURUSD', mtf_data: Dict[str, List[dict]] = None, backtest_mode: bool = False) -> Optional[Dict]:
         """
@@ -3149,6 +3219,15 @@ class FlexibleICTStrategy:
         
         # Set current symbol for pip calculations
         self.current_symbol = symbol
+        
+        # ===== SYMBOL FILTER: Block XAU_USD (added 2026-03-12) =====
+        # Data: XAU_USD 6W/28L = 17.6% WR, -1755 pips net.
+        # Removing it alone brings WR from 29.9% to 36.5%.
+        # Gold's intraday noise overwhelms all setups.
+        if symbol in ['XAUUSD', 'XAU_USD', 'GOLD']:
+            self._last_rejection_reasons.append(
+                "XAU_USD BLOCKED: 17.6% WR over 34 trades — symbol disabled")
+            return None
         
         # Set multi-timeframe data if provided
         if mtf_data:
@@ -3199,8 +3278,13 @@ class FlexibleICTStrategy:
                 f"{self._daily_losses} daily losses{remaining}")
             return None
         
-        # Daily housekeeping (reset counters on new day)
-        self.can_take_trade(current_timestamp, symbol)
+        # Daily housekeeping + per-symbol cap check
+        if not self.can_take_trade(current_timestamp, symbol):
+            normalized_symbol = self._normalize_symbol(symbol)
+            self._last_rejection_reasons.append(
+                f"Daily cap reached: {self.trades_today.get(normalized_symbol, 0)}/{self._max_trades_per_symbol} trades on {symbol}")
+            _log.info(f"🛑 [{symbol}] Rejected: Daily per-symbol cap reached")
+            return None
         
         # Determine priority based on symbol
         # Pair-specific priority (waterfall — first match wins):
@@ -3218,22 +3302,19 @@ class FlexibleICTStrategy:
         #
         # Top 2 (Opt4 + Opt1) must ALWAYS be prioritized.
         # Gold: Opt4 blocked (0% WR on gold), so Opt1 leads.
-        if 'XAU' in symbol:
-            # Gold: LIQ_SWEEP_ENGULF blocked inside try_option_4 (0/7 on gold)
-            # HTF_LIQUIDITY_BOS is the only reliable gold setup
-            options = [
-                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #1 for gold
-                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM
-                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP
-            ]
-        else:
-            # EUR & GBP: Hardened Opt4 first (58.8% WR), then Opt1 (backbone)
-            options = [
-                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1 (58.8% WR, +15.2R)
-                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
-                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM
-                lambda c, s=symbol: self.try_option_6(c, s),          # ZONE_OB_FIB_SWEEP
-            ]
+        # Gold is now blocked above, so only EUR & GBP reach here.
+        # Setup priority (tightened 2026-03-12):
+        #   - ZONE_OB_FIB_SWEEP DISABLED: 1W/4L = 20% WR, PBO = noise
+        #   - ICT_SWEEP_CONFIRM kept but shorts blocked below
+        #   - HTF_LIQUIDITY_BOS on EUR+GBP: 16W/23L = 41% WR — the backbone
+        #   - LIQ_SWEEP_ENGULF: 20.8% WR overall but 58.8% in backtests — keep as #1
+        # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
+        options = [
+            lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1
+            self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
+            lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — #3 (shorts blocked below)
+            # ZONE_OB_FIB_SWEEP (Opt 6) DISABLED: 1W/4L = 20% WR, PBO=noise
+        ]
         
         setup_data = None
         for option_func in options:
@@ -3254,6 +3335,27 @@ class FlexibleICTStrategy:
             return None
         
         direction = setup_data['direction']
+        
+        # ===== COUNTER-TREND HARD BLOCK (added 2026-03-07) =====
+        # Data: counter-trend trades had ~15% WR this week. Block ALL counter-trend signals.
+        htf_trend_check = setup_data.get('htf_trend')
+        if htf_trend_check and htf_trend_check != TrendDirection.RANGING:
+            if (htf_trend_check == TrendDirection.BULLISH and direction == 'short') or \
+               (htf_trend_check == TrendDirection.BEARISH and direction == 'long'):
+                self._last_rejection_reasons.append(
+                    f"Counter-trend BLOCKED: signal={direction}, HTF={htf_trend_check.value}")
+                _log.info(f"🚫 [{symbol}] Rejected: Counter-trend trade blocked")
+                return None
+        
+        # ===== ICT_SWEEP_CONFIRM SHORTS BLOCKED (added 2026-03-12) =====
+        # Data: ICT_SWEEP_CONFIRM shorts = 0W/5L (0% WR).
+        # Longs = 3W/4L (43%) — keep those.
+        setup_type_check = setup_data.get('setup_type')
+        if setup_type_check == SetupType.OPTION_5 and direction == 'short':
+            self._last_rejection_reasons.append(
+                "ICT_SWEEP_CONFIRM shorts BLOCKED: 0W/5L = 0% WR")
+            _log.info(f"🚫 [{symbol}] Rejected: ICT_SWEEP_CONFIRM shorts disabled")
+            return None
         
         # ===== NEW FILTERS =====
         
@@ -3296,14 +3398,18 @@ class FlexibleICTStrategy:
         session = self.get_session_type(current_timestamp)
         min_confidence = self.session_settings.get(session, {}).get('min_confidence', 0.85)
         
-        # Check confirmation count
+        # Check confirmation count (tightened 2026-03-07)
         confirmation_count = len(setup_data['confirmations'])
-        if confirmation_count < 2:
-            self._last_rejection_reasons.append(f"Insufficient confirmations ({confirmation_count}/2 required)")
-            return None  # Need at least 2 confirmations
+        is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
+        min_confirmations = 4 if is_gold else 3  # Gold needs 4+, forex needs 3+
+        if confirmation_count < min_confirmations:
+            self._last_rejection_reasons.append(
+                f"Insufficient confirmations ({confirmation_count}/{min_confirmations} required"
+                f"{' — gold requires extra' if is_gold else ''})")
+            return None
         
-        # Calculate risk percentage
-        risk_percentage = self.determine_risk_percentage(confirmation_count)
+        # Calculate risk percentage (tightened: forex 4+=full, 3=half; gold 5+=full, 4=half)
+        risk_percentage = self.determine_risk_percentage(confirmation_count, is_gold)
         
         # Calculate SL/TP
         entry_price = base_candles[-1]['close']

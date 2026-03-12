@@ -9,6 +9,7 @@ User=vanhansen53
 WorkingDirectory=/home/vanhansen53/forex_trading_bot
 Environment="PATH=/home/vanhansen53/.pyenv/versions/3.10.19/envs/forex-bot/bin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=/etc/jarvis/forex-bot.env
 ExecStart=/home/vanhansen53/.pyenv/versions/3.10.19/envs/forex-bot/bin/python3 scripts/tradingview_webhook_server.py
 Restart=always
 RestartSec=5

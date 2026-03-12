@@ -559,10 +559,15 @@ class AdvancedFilters:
         if weekday == 4 and hour >= 22:  # Friday after ~5pm EST
             return False, "Friday close - market closing"
         
-        # Session-hour filter: only trade 08:00–21:00 UTC (London open → NY close)
-        # Blocks Asian dead-zone and pre-London fakeouts.
-        if hour < 8 or hour >= 21:
-            return False, f"Outside session hours ({hour:02d}:00 UTC — need 08:00-21:00)"
+        # Session-hour filter (tightened 2026-03-12 based on 97-trade analysis):
+        # Data-driven allowed hours: 08-13, 15, 18-19 UTC
+        # Blocked hours with 0-15% WR:
+        #   01:00 (14%), 07:00 (10%), 14:00 (bad), 16-17 (0%), 20-21 (0%)
+        # Good hours: 00 (75%), 08-10 (mixed), 13 (44%), 15 (60%), 18 (100%), 19
+        # Conservative: stick to London + peak NY, skip dead zones
+        _allowed_hours = {8, 9, 10, 11, 12, 13, 15, 18, 19}
+        if hour not in _allowed_hours:
+            return False, f"Outside quality hours ({hour:02d}:00 UTC — allowed: 08-13, 15, 18-19)"
         
         return True, ''
     

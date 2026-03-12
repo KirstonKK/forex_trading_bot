@@ -33,12 +33,14 @@ logger = logging.getLogger(__name__)
 
 # Server configuration
 WEBHOOK_URL = "http://localhost:5000/webhook"
-WEBHOOK_SECRET = "your_secret_key_here"
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
+if not WEBHOOK_SECRET:
+    raise RuntimeError("WEBHOOK_SECRET is required. Set WEBHOOK_SECRET environment variable.")
 HEALTH_URL = "http://localhost:5000/health"
 DATA_URL = "http://localhost:5000/data"
 
-# Currency pairs to track
-PAIRS = ['EURUSD', 'GBPUSD', 'XAUUSD']
+# Currency pairs to track (XAU_USD removed 2026-03-12: 17.6% WR, -1755 pips)
+PAIRS = ['EURUSD', 'GBPUSD']
 
 # Data freshness threshold (seconds)
 STALE_DATA_THRESHOLD = 300  # 5 minutes

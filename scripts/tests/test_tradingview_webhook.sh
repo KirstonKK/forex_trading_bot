@@ -4,6 +4,8 @@
 echo "Testing TradingView Webhook Server..."
 echo ""
 
+SECRET="${WEBHOOK_SECRET:-test_webhook_secret}"
+
 # Check if server is running
 if ! curl -s http://localhost:5001/health > /dev/null; then
     echo "❌ Server not running. Start it with:"
@@ -23,7 +25,7 @@ for i in {1..55}; do
     curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
-        \"secret\": \"your_secret_key_here\",
+        \"secret\": \"$SECRET\",
         \"symbol\": \"EURUSD\",
         \"timeframe\": \"5M\",
         \"time\": $TIME,
@@ -51,7 +53,7 @@ for i in {1..55}; do
     curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
-        \"secret\": \"your_secret_key_here\",
+        \"secret\": \"$SECRET\",
         \"symbol\": \"EURUSD\",
         \"timeframe\": \"1H\",
         \"time\": $TIME,
@@ -79,7 +81,7 @@ for i in {1..55}; do
     curl -s -X POST http://localhost:5001/webhook \
       -H "Content-Type: application/json" \
       -d "{
-        \"secret\": \"your_secret_key_here\",
+        \"secret\": \"$SECRET\",
         \"symbol\": \"EURUSD\",
         \"timeframe\": \"4H\",
         \"time\": $TIME,

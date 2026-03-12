@@ -11,6 +11,9 @@ determine what was hit first.
 
 import json
 import logging
+import os
+import threading
+import time
 from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -319,10 +322,95 @@ class Trade:
 class TradeTracker:
     """Track and analyze trade performance."""
     
-    def __init__(self):
+    def __init__(self, on_resolve_callback=None):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self.active_trades: Dict[str, Trade] = self._load_active_trades()
         self.history: List[Dict] = self._load_history()
+        self._verifier_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._verifier_interval_seconds = int(os.environ.get('TRADE_VERIFY_INTERVAL_SECONDS', '300'))
+        self._on_resolve_callback = on_resolve_callback
+        self._start_background_verifier()
+
+    def _start_background_verifier(self):
+        """Start background verification worker (non-blocking for webhook requests)."""
+        if self._verifier_interval_seconds <= 0:
+            logger.info("Background trade verifier disabled (TRADE_VERIFY_INTERVAL_SECONDS<=0)")
+            return
+        if self._verifier_thread and self._verifier_thread.is_alive():
+            return
+
+        def _loop():
+            while not self._stop_event.is_set():
+                try:
+                    resolved = self.verify_active_trades(max_trades_per_cycle=5)
+                    if resolved and self._on_resolve_callback:
+                        for trade in resolved:
+                            try:
+                                self._on_resolve_callback(trade)
+                            except Exception as cb_err:
+                                logger.error(f"Resolve callback error: {cb_err}")
+                except Exception as e:
+                    logger.error(f"Background verification error: {e}")
+                self._stop_event.wait(self._verifier_interval_seconds)
+
+        self._verifier_thread = threading.Thread(target=_loop, name='trade-verifier', daemon=True)
+        self._verifier_thread.start()
+        logger.info(f"✅ Background trade verifier started (every {self._verifier_interval_seconds}s)")
+
+    def verify_active_trades(self, symbol: str = None, max_trades_per_cycle: int = 5) -> List[Dict[str, Any]]:
+        """Run full yfinance verification on active trades outside webhook request path."""
+        resolved = []
+
+        with self._lock:
+            candidates = [
+                (signal_id, trade)
+                for signal_id, trade in self.active_trades.items()
+                if trade.status == 'active' and (symbol is None or trade.symbol == symbol)
+            ]
+
+        checked = 0
+        for signal_id, trade in candidates:
+            if checked >= max_trades_per_cycle:
+                break
+            checked += 1
+
+            verification = verify_trade_against_history(trade)
+            if not verification or not verification.get('verified'):
+                continue
+
+            outcome = verification['outcome']
+            trade.status = outcome
+            trade.exit_price = verification['exit_price']
+            trade.exit_time = verification['exit_time']
+
+            if trade.direction in ('long', 'buy'):
+                if outcome == 'win':
+                    trade.pips_result = _calculate_pips(trade.take_profit - trade.entry_price, trade.symbol)
+                else:
+                    trade.pips_result = _calculate_pips(trade.stop_loss - trade.entry_price, trade.symbol)
+            else:
+                if outcome == 'win':
+                    trade.pips_result = _calculate_pips(trade.entry_price - trade.take_profit, trade.symbol)
+                else:
+                    trade.pips_result = -_calculate_pips(trade.stop_loss - trade.entry_price, trade.symbol)
+
+            sl_distance = _calculate_pips(abs(trade.entry_price - trade.stop_loss), trade.symbol)
+            trade.rr_achieved = (trade.pips_result / sl_distance) if sl_distance > 0 else 0
+
+            with self._lock:
+                if signal_id in self.active_trades:
+                    self.active_trades.pop(signal_id)
+                    self.history.append(asdict(trade))
+
+            resolved.append({**asdict(trade), 'verified': True})
+
+        if resolved:
+            with self._lock:
+                self._save_active_trades()
+                self._save_history()
+        return resolved
     
     def _load_active_trades(self) -> Dict[str, Trade]:
         """Load active trades from file."""
@@ -384,9 +472,10 @@ class TradeTracker:
         trade_id = signal_id or f"{symbol}_{signal.get('timestamp', int(datetime.now().timestamp()))}"
         
         # Don't double-register
-        if trade_id in self.active_trades:
-            logger.debug(f"Trade {trade_id} already tracked, skipping")
-            return trade_id, None
+        with self._lock:
+            if trade_id in self.active_trades:
+                logger.debug(f"Trade {trade_id} already tracked, skipping")
+                return trade_id, None
         
         trade = Trade(
             signal_id=trade_id,
@@ -458,13 +547,15 @@ class TradeTracker:
                 return trade_id, {**asdict(trade), 'verified': True}
         
         # No hit found yet — trade is genuinely active
-        self.active_trades[trade_id] = trade
-        self._save_active_trades()
+        with self._lock:
+            self.active_trades[trade_id] = trade
+            self._save_active_trades()
         return trade_id, None
     
     def update_trades(self, symbol: str, current_price: float,
                        candle_high: float = None, candle_low: float = None,
-                       force_verify: bool = False) -> List[Dict[str, Any]]:
+                       force_verify: bool = False,
+                       allow_full_verify: bool = True) -> List[Dict[str, Any]]:
         """
         Check if any active trades for this symbol hit TP or SL.
         
@@ -494,7 +585,10 @@ class TradeTracker:
         resolved = []
         to_remove = []
         
-        for signal_id, trade in self.active_trades.items():
+        with self._lock:
+            active_items = list(self.active_trades.items())
+
+        for signal_id, trade in active_items:
             if trade.symbol != symbol or trade.status != 'active':
                 continue
             
@@ -560,7 +654,7 @@ class TradeTracker:
             trade._verify_counter = getattr(trade, '_verify_counter', 0) + 1
             
             # Full verify every 6 candles (~30 min) or when quick check found a hit
-            needs_full_verify = quick_hit or force_verify or (trade._verify_counter >= 6)
+            needs_full_verify = allow_full_verify and (quick_hit or force_verify or (trade._verify_counter >= 6))
             
             if needs_full_verify:
                 trade._verify_counter = 0  # Reset counter
@@ -610,13 +704,16 @@ class TradeTracker:
                 # else: verification returned None (no hit found in history) — trade stays active
         
         # Move completed trades to history
-        for signal_id in to_remove:
-            trade = self.active_trades.pop(signal_id)
-            self.history.append(asdict(trade))
+        with self._lock:
+            for signal_id in to_remove:
+                if signal_id in self.active_trades:
+                    trade = self.active_trades.pop(signal_id)
+                    self.history.append(asdict(trade))
         
         if to_remove:
-            self._save_active_trades()
-            self._save_history()
+            with self._lock:
+                self._save_active_trades()
+                self._save_history()
         
         return resolved
     
@@ -691,9 +788,11 @@ class TradeTracker:
 # Singleton
 _tracker: Optional[TradeTracker] = None
 
-def get_trade_tracker() -> TradeTracker:
+def get_trade_tracker(on_resolve_callback=None) -> TradeTracker:
     """Get trade tracker instance."""
     global _tracker
     if _tracker is None:
-        _tracker = TradeTracker()
+        _tracker = TradeTracker(on_resolve_callback=on_resolve_callback)
+    elif on_resolve_callback is not None and _tracker._on_resolve_callback is None:
+        _tracker._on_resolve_callback = on_resolve_callback
     return _tracker
