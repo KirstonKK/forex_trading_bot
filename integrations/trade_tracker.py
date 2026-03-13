@@ -42,12 +42,15 @@ YFINANCE_TICKER_MAP = {
 # on Exness never touched it — so 2 pips was way too small.
 # Buffer = minimum distance BEYOND SL/TP the futures price must reach
 # before we consider it a real hit on spot.
+# Reduced 2026-03-13: 8 pips was too large — GBP SL at 12 pips from entry
+# was hit on broker but bot couldn't detect it (needed price 8 pips beyond SL).
+# Futures-spot divergence for forex is typically 1-3 pips, not 8.
 SPREAD_BUFFER = {
-    'EUR_USD': 0.00080,  # 8 pips — proven: 6.5 pip breach was false
-    'GBP_USD': 0.00080,  # 8 pips — GBP futures carry similar premium
+    'EUR_USD': 0.00020,  # 2 pips — typical futures-spot divergence
+    'GBP_USD': 0.00020,  # 2 pips — was 8, caused missed SL detection
     'XAU_USD': 3.00,     # 30 pips ($3.00) — Gold futures vs spot ~$30-40 gap
-    'EURUSD': 0.00080,
-    'GBPUSD': 0.00080,
+    'EURUSD': 0.00020,
+    'GBPUSD': 0.00020,
     'XAUUSD': 3.00,
 }
 
