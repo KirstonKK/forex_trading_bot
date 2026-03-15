@@ -25,33 +25,36 @@ DATA_DIR = Path(__file__).parent.parent / 'data'
 TRADES_FILE = DATA_DIR / 'active_trades.json'
 HISTORY_FILE = DATA_DIR / 'trade_history.json'
 
-# yfinance ticker mapping (CME futures)
+# yfinance ticker mapping — use SPOT tickers, not CME futures.
+# Futures (6E=F) carry a ~45-pip premium over spot for EUR; using
+# futures caused false entry fills and SL hits.
 YFINANCE_TICKER_MAP = {
-    'EUR_USD': '6E=F',
-    'GBP_USD': '6B=F',
+    'EUR_USD': 'EURUSD=X',
+    'GBP_USD': 'GBPUSD=X',
     'XAU_USD': 'GC=F',
-    'EURUSD': '6E=F',
-    'GBPUSD': '6B=F',
+    'EURUSD': 'EURUSD=X',
+    'GBPUSD': 'GBPUSD=X',
     'XAUUSD': 'GC=F',
+    # US30 (Dow Jones) — E-mini Dow futures
+    'US30': 'YM=F',
+    'US_30': 'YM=F',
 }
 
-# Spot-futures spread buffer.
-# We verify against CME futures (6E=F, 6B=F, GC=F) but user trades spot
-# on Exness. Futures carry a premium over spot that varies throughout
-# the day. On Feb 18, 2026 futures hit 6.5 pips above SL while spot
-# on Exness never touched it — so 2 pips was way too small.
-# Buffer = minimum distance BEYOND SL/TP the futures price must reach
-# before we consider it a real hit on spot.
-# Reduced 2026-03-13: 8 pips was too large — GBP SL at 12 pips from entry
-# was hit on broker but bot couldn't detect it (needed price 8 pips beyond SL).
-# Futures-spot divergence for forex is typically 1-3 pips, not 8.
+# Spread buffer for SL/TP verification.
+# Now using spot tickers (EURUSD=X) instead of CME futures, so the
+# yfinance-vs-broker difference is minimal (different liquidity providers).
+# 1 pip buffer to account for minor quote differences between yfinance
+# spot and Exness spot.
 SPREAD_BUFFER = {
-    'EUR_USD': 0.00020,  # 2 pips — typical futures-spot divergence
-    'GBP_USD': 0.00020,  # 2 pips — was 8, caused missed SL detection
-    'XAU_USD': 3.00,     # 30 pips ($3.00) — Gold futures vs spot ~$30-40 gap
-    'EURUSD': 0.00020,
-    'GBPUSD': 0.00020,
+    'EUR_USD': 0.00010,  # 1 pip — spot-vs-spot quote variance
+    'GBP_USD': 0.00010,  # 1 pip
+    'XAU_USD': 3.00,     # Gold still uses futures (GC=F)
+    'EURUSD': 0.00010,
+    'GBPUSD': 0.00010,
     'XAUUSD': 3.00,
+    # US30 (Dow Jones) — 5 points buffer for futures spread
+    'US30': 5.0,
+    'US_30': 5.0,
 }
 
 # Cache yfinance import
@@ -74,7 +77,10 @@ def _calculate_pips(price_diff: float, symbol: str) -> float:
     Calculate pips from a price difference.
     Forex pairs: 1 pip = 0.0001 (10,000 multiplier)
     Gold (XAU):  1 pip = 0.10   (10 multiplier)
+    US30 (Dow):  1 pip = 1 point (1x multiplier)
     """
+    if 'US30' in symbol or 'US_30' in symbol:
+        return price_diff * 1    # US30: 1 point = 1 pip equivalent
     if 'XAU' in symbol or 'GOLD' in symbol:
         return price_diff * 10  # Gold: $0.10 = 1 pip
     return price_diff * 10000   # Forex: 0.0001 = 1 pip

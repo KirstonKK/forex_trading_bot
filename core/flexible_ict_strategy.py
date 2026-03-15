@@ -60,6 +60,7 @@ class SetupType(Enum):
     OPTION_4 = "LIQ_SWEEP_ENGULF"   # Liquidity Sweep + Engulfing (price action)
     OPTION_5 = "ICT_SWEEP_CONFIRM"  # Sweep + BOS + iFVG + SMT + 79% ext (full ICT model)
     OPTION_6 = "ZONE_OB_FIB_SWEEP"  # Corrected consolidation of Opt 2+3 (zone + OB/FVG + Fib + sweep)
+    OPTION_7 = "BREAKER_BLOCK"      # Failed S/D zone flip — US30 specific
 
 
 @dataclass
@@ -253,13 +254,24 @@ class FlexibleICTStrategy:
             import logging
             logging.getLogger('strategy').warning(f"Could not save signal state: {e}")
     
+    # ===== US30 / INDEX HELPERS =====
+    _US30_SYMBOLS = {'US30', 'US_30', 'YM', 'YM=F', '^DJI', 'DJI'}
+
+    def _is_us30(self, symbol: str = None) -> bool:
+        """Check if symbol is US30 (Dow Jones index)."""
+        sym = (symbol or self.current_symbol).replace('_', '').upper()
+        return sym in self._US30_SYMBOLS or 'US30' in sym or sym in ('YM', 'YMF', 'DJI')
+
     def get_pip_value(self, symbol: str = None) -> float:
         """
         Get pip value for the symbol.
         - Forex pairs (EURUSD, GBPUSD): 0.0001 (4th decimal)
         - Gold (XAUUSD): 0.10 ($0.10 per point)
+        - US30 (Dow Jones): 1.0 (whole points)
         """
         sym = symbol or self.current_symbol
+        if self._is_us30(sym):
+            return 1.0  # US30 moves in whole points
         if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
             return 0.10  # Gold moves in $0.10 increments
         return 0.0001  # Standard forex pairs
@@ -269,8 +281,11 @@ class FlexibleICTStrategy:
         Get point value for the symbol (smaller unit for SL/TP calculations).
         - Forex pairs: 0.00001 (5th decimal)
         - Gold: 0.01 ($0.01)
+        - US30: 0.1 (tenth of a point)
         """
         sym = symbol or self.current_symbol
+        if self._is_us30(sym):
+            return 0.1  # US30 point value
         if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
             return 0.01  # Gold point value
         return 0.00001  # Standard forex pairs
@@ -431,7 +446,15 @@ class FlexibleICTStrategy:
         
         pip_value = self.get_pip_value(symbol)
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
-        zone_tolerance = 50 * pip_value if not is_gold else 20.0  # 50 pips forex, $20 gold
+        is_us30 = self._is_us30(symbol)
+        # US30: 100 points tolerance (index moves ~300-500 pts/day)
+        # Forex: 50 pips, Gold: $20
+        if is_us30:
+            zone_tolerance = 100.0  # 100 points for US30
+        elif is_gold:
+            zone_tolerance = 20.0
+        else:
+            zone_tolerance = 50 * pip_value
         expiry = 24 * 3600  # 24 hours
         
         for loss in losses:
@@ -2958,7 +2981,21 @@ class FlexibleICTStrategy:
         # Max SL limits - different for Gold vs Forex
         # Gold SL widened 2026-02-25: $10-15 min was too tight for $5200 gold,
         # normal intraday ATR is $25-40. Bot kept getting stopped out by noise.
-        if is_gold:
+        is_us30 = self._is_us30(symbol)
+        if is_us30:
+            # US30: SL in index points (30-80 typical range)
+            # point_value = 0.1, so 30 points = 300 point_value units
+            atr_multiplier = 2.0  # US30 needs 2x ATR for SL
+            if setup_type == 'HTF_LIQUIDITY_BOS':
+                max_sl_points = 800   # 80 points max
+                min_sl_points = 300   # 30 points min
+            elif setup_type == 'BREAKER_BLOCK':
+                max_sl_points = 1000  # 100 points max (breaker zones wider)
+                min_sl_points = 300   # 30 points min
+            else:
+                max_sl_points = 800   # 80 points max
+                min_sl_points = 300   # 30 points min
+        elif is_gold:
             if setup_type == 'HTF_LIQUIDITY_BOS':
                 max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS (was $20)
                 min_sl_points = 2000   # $20 min (was $10)
@@ -3248,7 +3285,11 @@ class FlexibleICTStrategy:
             current_timestamp = int(datetime.now(timezone.utc).timestamp())
         
         # ===== SESSION CHECK FIRST - Must be in trading hours =====
-        can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
+        # US30 uses different session hours (NYSE: 13-19 UTC) vs forex (08-19 UTC)
+        if self._is_us30(symbol):
+            can_trade, session_reason = self.filters.can_trade_now_us30(current_timestamp)
+        else:
+            can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
         if not can_trade:
             self._last_rejection_reasons.append(f"Outside trading session: {session_reason}")
             return None
@@ -3308,13 +3349,27 @@ class FlexibleICTStrategy:
         #   - ICT_SWEEP_CONFIRM kept but shorts blocked below
         #   - HTF_LIQUIDITY_BOS on EUR+GBP: 16W/23L = 41% WR — the backbone
         #   - LIQ_SWEEP_ENGULF: 20.8% WR overall but 58.8% in backtests — keep as #1
-        # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
-        options = [
-            lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1
-            self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
-            lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — #3 (shorts blocked below)
-            # ZONE_OB_FIB_SWEEP (Opt 6) DISABLED: 1W/4L = 20% WR, PBO=noise
-        ]
+        # ===== US30 ROUTING (isolated from forex) =====
+        # US30 uses its own setup priority waterfall:
+        #   Option 4 (Sweep + Engulf) → Option 1 (HTF + Sweep + BoS) → Option 5 (no SMT)
+        # Breaker Block (Opt 7) added later after backtest validation.
+        # US30 has no correlated pair → SMT is skipped in Option 5.
+        # Session hours enforced by advanced_filters.can_trade_now() (US30-aware).
+        if self._is_us30(symbol):
+            options = [
+                lambda c, s=symbol: self.try_option_4(c, s),      # LIQ_SWEEP_ENGULF — primary for US30
+                lambda c, s=symbol: self.try_option_1(c, s),      # HTF_LIQUIDITY_BOS — structural backbone
+                lambda c, s=symbol: self.try_option_5(c, s),      # ICT_SWEEP_CONFIRM (no SMT — auto-skipped, no correlated pair)
+                lambda c, s=symbol: self.try_option_6(c, s),      # S/D Zone setup — enabled for US30 (your friend's approach)
+            ]
+        else:
+            # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
+            options = [
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — #3 (shorts blocked below)
+                # ZONE_OB_FIB_SWEEP (Opt 6) DISABLED for forex: 1W/4L = 20% WR, PBO=noise
+            ]
         
         setup_data = None
         for option_func in options:

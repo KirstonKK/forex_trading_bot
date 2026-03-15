@@ -156,13 +156,16 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
         List of candle dictionaries
     """
     try:
-        # Map forex pairs to futures contracts
+        # Map forex pairs to yfinance spot tickers
+        # IMPORTANT: Use =X spot tickers, NOT CME futures (6E=F etc.)
+        # Futures carry a ~45-pip premium over spot for EUR, causing
+        # false trade fills and SL hits.
         symbol_map = {
-            'EURUSD': '6E=F',  # Euro futures
-            'GBPUSD': '6B=F',  # British Pound futures
-            'USDJPY': '6J=F',  # Japanese Yen futures
-            'AUDUSD': '6A=F',  # Australian Dollar futures
-            'XAUUSD': 'GC=F'   # Gold futures
+            'EURUSD': 'EURUSD=X',  # EUR/USD spot
+            'GBPUSD': 'GBPUSD=X',  # GBP/USD spot
+            'USDJPY': 'USDJPY=X',  # USD/JPY spot
+            'AUDUSD': 'AUDUSD=X',  # AUD/USD spot
+            'XAUUSD': 'GC=F'       # Gold futures (no spot ticker)
         }
         
         ticker_symbol = symbol_map.get(symbol, symbol)

@@ -152,8 +152,8 @@ def generate_trades(trade_start: datetime, trade_end: datetime) -> List[Dict]:
     from core.flexible_ict_strategy import FlexibleICTStrategy
 
     yf_map = {
-        'EUR_USD': '6E=F',
-        'GBP_USD': '6B=F',
+        'EUR_USD': 'EURUSD=X',
+        'GBP_USD': 'GBPUSD=X',
         'XAU_USD': 'GC=F',
     }
     symbols = ['EUR_USD', 'GBP_USD', 'XAU_USD']
