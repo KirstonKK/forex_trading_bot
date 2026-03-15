@@ -53,6 +53,17 @@ class US30Backtest:
     
     def __init__(self):
         self.strategy = FlexibleICTStrategy()
+        # Reset all persisted state so backtest starts clean
+        # (prevents cooldowns from previous runs blocking signals)
+        self.strategy._last_signal_time = {}
+        self.strategy._recent_signals = {}
+        self.strategy._recent_losses = {}
+        self.strategy._consecutive_losses = 0
+        self.strategy._circuit_breaker_until = 0
+        self.strategy._daily_losses = 0
+        self.strategy._daily_loss_date = None
+        self.strategy.trades_today = {}
+        self.strategy.current_date = None
         self.trades: List[BacktestTrade] = []
         
     def fetch_data(self) -> Dict[str, List[dict]]:
@@ -180,13 +191,8 @@ class US30Backtest:
             if active_trade:
                 continue
             
-            # Cooldown: Wait 12 candles (1 hour) after exit
-            if last_trade_exit_idx > 0 and (i - last_trade_exit_idx) < 12:
-                continue
-            
-            # Max 2 trades per day for US30
-            trade_date = current_time.date()
-            if last_trade_date == trade_date:
+            # Cooldown: Wait 6 candles (30 min) after exit
+            if last_trade_exit_idx > 0 and (i - last_trade_exit_idx) < 6:
                 continue
             
             # Build MTF data window

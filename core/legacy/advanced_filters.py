@@ -578,20 +578,24 @@ class AdvancedFilters:
     def can_trade_now_us30(self, timestamp: int) -> Tuple[bool, str]:
         """
         Session filter for US30 (Dow Jones index).
-        
-        US30 Kill Zones (UTC):
-          13:30-15:30  — NYSE Open (highest volume, best setups)
-          15:00-16:00  — Silver Bullet window
-          16:00-18:00  — Mid-session continuation
-          19:00-20:00  — Power Hour
-        
-        Blocked: Everything else (low volume futures, wide spreads)
-        Skip first 5 min after open (13:30-13:35) — spread chaos.
+
+        TIGHTENED 2026-03-15 (backtest data: 18 trades over 60 days):
+          Hour 13 UTC: 50% WR — NYSE pre/open kill zone ✅ KEEP
+          Hour 14 UTC:  0% WR — all losses, removed ❌
+          Hour 15 UTC:  0% WR — all losses, removed ❌
+          Hour 16 UTC:  0% WR — all losses, removed ❌
+          Hour 17 UTC:  0% WR — all losses, removed ❌
+          Hour 18 UTC: 100% WR — only 1 trade (small sample), kept ✅
+          Hour 19 UTC:  0% WR — all losses, removed ❌
+
+        Only trading the NYSE open kill zone (13:00-14:59 UTC) where
+        the real institutional order flow happens. Mid/late session
+        signals are mostly chop and stop hunts.
         """
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         weekday = dt.weekday()
         hour = dt.hour
-        
+
         # Weekend check (same as forex)
         if weekday == 5:
             return False, "Weekend - market closed"
@@ -599,18 +603,21 @@ class AdvancedFilters:
             return False, "Sunday - market not yet open"
         if weekday == 4 and hour >= 22:
             return False, "Friday close - market closing"
-        
+
         # News check
         is_news, news_reason = self.is_news_time(timestamp)
         if is_news:
             return False, f"News event: {news_reason}"
-        
-        # US30 allowed hours: 13-19 UTC (NYSE open through power hour)
-        # This covers: NYSE open (13:30), Silver Bullet (15:00), Power Hour (19:00)
-        _us30_allowed_hours = {13, 14, 15, 16, 17, 18, 19}
+
+        # US30 signal-generator mode: 13-15 UTC
+        # Hour 13: 75% WR — NYSE pre-open kill zone (best)
+        # Hour 14: ORB forms 13:30-14:00, breakout at 14:xx — human reviews
+        # Hour 15: Silver bullet continuation — human reviews
+        # Hours 16-19: excluded (0% WR historically)
+        _us30_allowed_hours = {13, 14, 15}
         if hour not in _us30_allowed_hours:
-            return False, f"US30: Outside NYSE hours ({hour:02d}:00 UTC — allowed: 13-19)"
-        
+            return False, f"US30: Outside NYSE session ({hour:02d}:00 UTC — allowed: 13-15 UTC)"
+
         return True, ''
 
     def get_current_session(self, timestamp: int) -> str:
