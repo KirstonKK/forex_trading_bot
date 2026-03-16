@@ -61,7 +61,7 @@ class SetupType(Enum):
     OPTION_5 = "ICT_SWEEP_CONFIRM"  # Sweep + BOS + iFVG + SMT + 79% ext (full ICT model)
     OPTION_6 = "ZONE_OB_FIB_SWEEP"  # Corrected consolidation of Opt 2+3 (zone + OB/FVG + Fib + sweep)
     OPTION_7 = "BREAKER_BLOCK"      # Failed S/D zone flip — US30 specific
-    OPTION_8 = "ORB_BREAKOUT"       # Opening Range Breakout — US30 proven setup
+    OPTION_9 = "SD_ZONE_FVG_REFILL" # Supply/Demand zone + FVG refill entry — US30
 
 
 @dataclass
@@ -2970,181 +2970,201 @@ class FlexibleICTStrategy:
         }
 
     # ====================================================================
-    # OPTION 8: OPENING RANGE BREAKOUT (ORB) — US30 Proven Setup
+    # OPTION 9: SUPPLY/DEMAND ZONE + FVG REFILL — US30
     #
-    # One of the most studied and proven setups for equity indices.
-    # Used by professional traders and quantitative funds since the 1990s.
-    # Documented by Toby Crabel ("Day Trading With Short Term Price Patterns"),
-    # Linda Raschke, and extensively validated in academic literature.
+    # Replaces ORB (2026-03-15). ORB chased breakouts into chop (60% wrong
+    # direction). This setup does the opposite — waits for price to PULL BACK
+    # to a validated S/D zone where an FVG was created on the impulse away,
+    # then enters as price refills that FVG inside the zone.
     #
-    # Concept:
-    #   US30 sets an opening range in the first 30 minutes of NYSE open
-    #   (13:30-14:00 UTC). When price breaks out of this range with momentum,
-    #   it tends to trend for the rest of the session.
+    # Why this works for US30:
+    #   - Institutional order flow creates clear S/D zones on 1H
+    #   - The impulse away from the zone leaves an FVG (unfilled orders)
+    #   - Price returns to fill the FVG = institutions re-entering at discount/premium
+    #   - Entry is at a defined structural level with clear invalidation (zone boundary)
     #
     # Rules:
-    #   1. Mark the range of the first 6 candles after NYSE open (13:30-14:00 UTC)
-    #   2. Enter LONG on close above the range high (bullish breakout)
-    #      Enter SHORT on close below the range low (bearish breakout)
-    #   3. HTF trend must align with breakout direction (4H or 1H trend filter)
-    #   4. Range must be "tight enough" — wide ranges on choppy opens are false
-    #   5. SL = opposite side of the opening range
-    #   6. TP = 1:2 RR minimum (range size × 2) targeting DOL
+    #   1. Find a validated 1H S/D zone (strong impulse candle, not mitigated)
+    #   2. Find an FVG created on the MOVE AWAY from that zone (within 10 candles)
+    #   3. Current price must be INSIDE the FVG (refilling it)
+    #   4. FVG must be AT or OVERLAPPING the S/D zone
+    #   5. 4H trend must align with zone direction (no counter-trend)
+    #   6. Rejection candle at the FVG (wick showing zone respect)
+    #   7. SL = beyond zone boundary + 50pt buffer
     # ====================================================================
 
-    def try_option_8(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+    def try_option_9(self, candles: List[dict], symbol: str) -> Optional[Dict]:
         """
-        Option 8: Opening Range Breakout (ORB) — US30 Proven Setup
+        Option 9: Supply/Demand Zone + FVG Refill — US30
 
-        Marks the first 30-min range after NYSE open (13:30-14:00 UTC),
-        then enters on a confirmed breakout of that range.
+        Waits for price to pull back to a validated 1H S/D zone where an FVG
+        was created on the impulse away, then enters as price refills the FVG.
 
-        Proven edge: ~55-65% WR in academic studies on equity indices.
-        Works because institutional algorithms execute large orders at the open,
-        creating directional momentum that persists for hours.
-
-        Requirements:
-        1. We have at least 6 5M candles from 13:30 UTC (the opening range)
-        2. Current price has broken ABOVE the range high (long) or BELOW the range low (short)
-        3. The breakout candle must CLOSE beyond the range (not just wick)
-        4. HTF trend (4H) must align OR be ranging (ORB works in both cases)
-        5. Range size must be between 30-300 points (too tight = noise, too wide = gap day)
+        This is a REVERSION setup (opposite of ORB breakout chasing).
+        Entry is at a structural discount/premium with defined invalidation.
         """
         import logging
         _log = logging.getLogger('strategy')
         confirmations = []
 
-        # ====== STEP 1: Find the opening range candles ======
-        # Opening range = first 6 x 5M candles after NYSE open (13:30-14:00 UTC)
-        # In our session filter, we enter at 13:00 UTC — but the actual NYSE open is
-        # 13:30 UTC (9:30 AM EST). We use the first 6 candles AFTER 13:30.
-        current_time = datetime.fromtimestamp(candles[-1]['timestamp'], tz=timezone.utc)
-        current_hour = current_time.hour
-        current_minute = current_time.minute
-
-        # Find candles that belong to the opening range (13:30-14:00 UTC)
-        orb_candles = []
-        for c in candles:
-            ct = datetime.fromtimestamp(c['timestamp'], tz=timezone.utc)
-            if ct.hour == 13 and ct.minute >= 30:
-                orb_candles.append(c)
-            elif ct.hour == 14 and ct.minute == 0:
-                orb_candles.append(c)
-
-        # If it's before 14:00 UTC, we need enough opening range candles
-        # If it's after 14:05, the range is fully formed (need at least 6 candles)
-        if len(orb_candles) < 3:
-            self._last_rejection_reasons.append(
-                f"Opt8: Not enough opening range candles ({len(orb_candles)}/6) — too early")
-            return None
-
-        # ====== STEP 2: Define the opening range ======
-        orb_high = max(c['high'] for c in orb_candles)
-        orb_low = min(c['low'] for c in orb_candles)
-        orb_range = orb_high - orb_low
-
-        # Range size sanity check — too tight = false signal, too wide = gap/volatile day
-        # US30 typical opening range: 50-200 points. Outside this = skip.
-        min_range = 30.0   # 30 points minimum (otherwise it's basically nothing)
-        max_range = 300.0  # 300 points maximum (avoid extreme open-gap days)
-
-        if orb_range < min_range:
-            self._last_rejection_reasons.append(
-                f"Opt8: ORB range too tight ({orb_range:.0f}pts < {min_range}pts) — likely indecision")
-            return None
-        if orb_range > max_range:
-            self._last_rejection_reasons.append(
-                f"Opt8: ORB range too wide ({orb_range:.0f}pts > {max_range}pts) — gap/volatile day")
-            return None
-
-        confirmations.append(f"ORB_RANGE_{orb_range:.0f}PTS")
-
-        # ====== STEP 3: Check for breakout ======
-        # The current candle (or the last few) must have CLOSED beyond the ORB
         current_price = candles[-1]['close']
         current_candle = candles[-1]
 
-        # Buffer: require close at least 10 points beyond the ORB to avoid false breakouts
-        breakout_buffer = 10.0  # 10 points
-
-        if current_candle['close'] > orb_high + breakout_buffer:
-            direction = 'long'
-            confirmations.append("ORB_BREAKOUT_LONG")
-            self._last_sweep_found = True
-        elif current_candle['close'] < orb_low - breakout_buffer:
-            direction = 'short'
-            confirmations.append("ORB_BREAKOUT_SHORT")
-            self._last_sweep_found = True
-        else:
-            self._last_rejection_reasons.append(
-                f"Opt8: No ORB breakout (price {current_price:.0f} inside range "
-                f"{orb_low:.0f}-{orb_high:.0f})")
+        # ====== STEP 1: Find validated 1H S/D zones ======
+        # Use 1H zones (not 4H) — US30 intraday zones are on 1H
+        candles_1h = self.get_htf_candles(60) if self.mtf_data else []
+        if len(candles_1h) < 20:
+            self._last_rejection_reasons.append("Opt9: Insufficient 1H data for S/D zone detection")
             return None
 
-        # ====== STEP 4: HTF Trend Filter ======
-        # ORB works in trending AND ranging markets, but we still want to avoid
-        # trading against strong opposing trends. If 4H is strongly counter to breakout, skip.
+        # Find zones using the validated detector (requires strong impulse + not mitigated)
+        zones_1h = self._find_validated_htf_zones(candles, 60)
+        zones_4h = self._find_validated_htf_zones(candles, 240)
+        all_zones = zones_1h + zones_4h
+
+        if not all_zones:
+            self._last_rejection_reasons.append("Opt9: No validated S/D zones on 1H/4H")
+            return None
+
+        # ====== STEP 2: Find FVGs created on the move AWAY from each zone ======
+        # For a DEMAND zone: the impulse away is BULLISH → creates a BULLISH FVG above zone
+        # For a SUPPLY zone: the impulse away is BEARISH → creates a BEARISH FVG below zone
+        # We need the FVG to be NEAR the zone (within the zone or just above/below it)
+
+        # Use quality FVGs (minimum size, still open)
+        quality_fvgs = self._find_quality_fvgs(candles)
+
+        # US30-specific: use wider tolerance for zone/FVG overlap (index is noisy)
+        zone_fvg_tolerance = 80.0  # 80 points — US30 zones can be wide
+
+        matched_zone = None
+        matched_fvg = None
+        direction = None
+
+        for zone in all_zones:
+            expected_fvg_dir = 'bullish' if zone.zone_type == 'demand' else 'bearish'
+            trade_dir = 'long' if zone.zone_type == 'demand' else 'short'
+
+            for fvg in quality_fvgs:
+                if fvg.direction != expected_fvg_dir:
+                    continue
+
+                # FVG must overlap with or be just above/below the zone
+                # For demand zone: FVG should be at or above zone high (impulse up created it)
+                # For supply zone: FVG should be at or below zone low (impulse down created it)
+                if zone.zone_type == 'demand':
+                    fvg_near_zone = fvg.bottom <= zone.high + zone_fvg_tolerance
+                else:
+                    fvg_near_zone = fvg.top >= zone.low - zone_fvg_tolerance
+
+                if not fvg_near_zone:
+                    continue
+
+                # ====== STEP 3: Current price must be INSIDE the FVG (refilling) ======
+                price_in_fvg = fvg.bottom <= current_price <= fvg.top
+
+                if not price_in_fvg:
+                    continue
+
+                # Found a match!
+                matched_zone = zone
+                matched_fvg = fvg
+                direction = trade_dir
+                break
+
+            if matched_zone:
+                break
+
+        if not matched_zone or not matched_fvg or direction is None:
+            self._last_rejection_reasons.append(
+                "Opt9: No S/D zone with FVG refill at current price")
+            return None
+
+        # direction is guaranteed non-None from here
+        trade_direction: str = direction
+
+        confirmations.append(f"SD_ZONE_{matched_zone.zone_type.upper()}_{matched_zone.timeframe}")
+        confirmations.append(f"FVG_REFILL_{matched_fvg.direction.upper()}")
+
+        # ====== STEP 4: 4H trend alignment ======
         htf_trend_4h = self.determine_htf_trend(candles, 240)
-
-        if direction == 'long' and htf_trend_4h == TrendDirection.BEARISH:
+        if htf_trend_4h == TrendDirection.RANGING:
+            # Ranging 4H is OK for S/D — zones work in ranging markets too
+            pass
+        elif (htf_trend_4h == TrendDirection.BEARISH and trade_direction == 'long') or \
+             (htf_trend_4h == TrendDirection.BULLISH and trade_direction == 'short'):
             self._last_rejection_reasons.append(
-                "Opt8: ORB long breakout against strong 4H bearish trend — blocked")
-            return None
-        if direction == 'short' and htf_trend_4h == TrendDirection.BULLISH:
-            self._last_rejection_reasons.append(
-                "Opt8: ORB short breakout against strong 4H bullish trend — blocked")
+                f"Opt9: Counter-trend blocked (4H={htf_trend_4h.value}, signal={trade_direction})")
             return None
 
         if htf_trend_4h != TrendDirection.RANGING:
             confirmations.append(f"HTF_4H_{htf_trend_4h.value.upper()}_ALIGNED")
 
-        # ====== STEP 5: Momentum confirmation ======
-        # The breakout candle should be larger than average (momentum, not drift)
-        recent_ranges = [c['high'] - c['low'] for c in candles[-20:]]
-        avg_range = sum(recent_ranges) / len(recent_ranges) if recent_ranges else 1
-        breakout_candle_range = current_candle['high'] - current_candle['low']
+        # ====== STEP 5: Rejection candle at the FVG ======
+        # The current candle should show a wick indicating zone respect
+        body_size = abs(current_candle['close'] - current_candle['open'])
+        upper_wick = current_candle['high'] - max(current_candle['open'], current_candle['close'])
+        lower_wick = min(current_candle['open'], current_candle['close']) - current_candle['low']
 
-        if breakout_candle_range >= avg_range * 1.2:
-            confirmations.append("MOMENTUM_BREAKOUT")
+        # US30: use 5-point minimum wick (index candles are larger than forex)
+        min_wick = 5.0
+
+        if trade_direction == 'long':
+            # For LONG at demand zone: want lower wick (buyers stepping in)
+            if lower_wick >= min_wick or lower_wick >= body_size * 0.3:
+                confirmations.append("REJECTION_WICK")
+            # Also accept a bullish close (close > open) as confirmation
+            elif current_candle['close'] > current_candle['open']:
+                confirmations.append("BULLISH_CLOSE")
         else:
-            self._last_rejection_reasons.append(
-                f"Opt8: Breakout candle too small ({breakout_candle_range:.0f}pts vs avg {avg_range:.0f}pts)")
-            return None
+            # For SHORT at supply zone: want upper wick (sellers stepping in)
+            if upper_wick >= min_wick or upper_wick >= body_size * 0.3:
+                confirmations.append("REJECTION_WICK")
+            elif current_candle['close'] < current_candle['open']:
+                confirmations.append("BEARISH_CLOSE")
 
-        # Minimum confirmations
+        # ====== STEP 6: BOS or ChoCH (bonus — adds confidence) ======
+        has_bos = self.check_bos(candles, direction)
+        has_choch = self.check_choch(candles, direction)
+        if has_bos:
+            confirmations.append("BOS")
+            self._last_bos_found = True
+        if has_choch:
+            confirmations.append("CHOCH")
+
+        # Minimum confirmation gate
         if len(confirmations) < 3:
             self._last_rejection_reasons.append(
-                f"Opt8: Only {len(confirmations)}/3 confirmations")
+                f"Opt9: Only {len(confirmations)}/3 confirmations ({', '.join(confirmations)})")
             return None
 
         _log.info(
-            f"✅ [{symbol}] Option 8 (ORB) HIT: {direction} | "
-            f"Range: {orb_low:.0f}-{orb_high:.0f} ({orb_range:.0f}pts) | "
-            f"Breakout: {current_price:.0f} | Confirms: {', '.join(confirmations)}"
+            f"✅ [{symbol}] Option 9 (SD_ZONE_FVG_REFILL) HIT: {direction} | "
+            f"Zone: {matched_zone.zone_type} [{matched_zone.low:.0f}–{matched_zone.high:.0f}] | "
+            f"FVG: [{matched_fvg.bottom:.0f}–{matched_fvg.top:.0f}] | "
+            f"Confirms: {', '.join(confirmations)}"
         )
 
         return {
-            'setup_type': SetupType.OPTION_8,
+            'setup_type': SetupType.OPTION_9,
             'direction': direction,
             'confirmations': confirmations,
             'htf_trend': htf_trend_4h if htf_trend_4h != TrendDirection.RANGING else None,
             'has_liquidity_sweep': False,
-            'has_bos': False,
-            'has_choch': False,
+            'has_bos': has_bos,
+            'has_choch': has_choch,
             'has_fib_confluence': False,
             'asian_sweep': False,
             'order_block': None,
-            'fvg': None,
-            'htf_zone': HTFZone(
-                high=orb_high,
-                low=orb_low,
-                timeframe='5M',
-                zone_type='demand' if direction == 'long' else 'supply'
+            'fvg': FVG(
+                top=matched_fvg.top,
+                bottom=matched_fvg.bottom,
+                timestamp=matched_fvg.timestamp,
+                direction=matched_fvg.direction
             ),
-            # Store ORB range for SL calculation
-            '_orb_high': orb_high,
-            '_orb_low': orb_low,
-            '_orb_range': orb_range,
+            'htf_zone': matched_zone,
+            # SL hint: beyond zone boundary
+            '_zone_sl_level': matched_zone.low if direction == 'long' else matched_zone.high,
         }
 
     def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
@@ -3220,49 +3240,6 @@ class FlexibleICTStrategy:
         setup_type = setup_data['setup_type'].value if hasattr(setup_data['setup_type'], 'value') else str(setup_data['setup_type'])
         
         is_us30 = self._is_us30(symbol)
-
-        # ORB special SL: SL = opposite side of the opening range
-        # For LONG ORB: SL = ORB low (below the range floor)
-        # For SHORT ORB: SL = ORB high (above the range ceiling)
-        if setup_type == 'ORB_BREAKOUT' and '_orb_low' in setup_data and '_orb_high' in setup_data:
-            orb_buffer = 10.0  # 10 point buffer beyond ORB boundary
-            if is_long:
-                stop_loss = setup_data['_orb_low'] - orb_buffer
-            else:
-                stop_loss = setup_data['_orb_high'] + orb_buffer
-            sl_distance = abs(entry - stop_loss)
-            sl_points = sl_distance / point_value
-            # Apply min/max bounds for ORB
-            if is_us30:
-                sl_points = max(sl_points, 800)   # min 80pts
-                sl_points = min(sl_points, 1200)  # max 120pts
-                sl_distance = sl_points * point_value
-                if is_long:
-                    stop_loss = entry - sl_distance
-                else:
-                    stop_loss = entry + sl_distance
-            # Go straight to TP calculation
-            candles_5m_dol = self.mtf_data.get('5M', candles) if self.mtf_data else candles
-            candles_1h_dol = self.mtf_data.get('1H', []) if self.mtf_data else []
-            dol_targets = self.find_dol_targets(candles_5m_dol, candles_1h_dol, direction, symbol,
-                                                 entry_price=entry, sl_distance=sl_distance)
-            min_rr_floor = 1.5 if is_gold else 2.0
-            take_profit = None
-            if dol_targets:
-                for t in dol_targets:
-                    if abs(t['price'] - entry) >= sl_distance * min_rr_floor:
-                        take_profit = t['price']
-                        break
-            if take_profit is None:
-                take_profit = (entry + sl_distance * min_rr_floor) if is_long else (entry - sl_distance * min_rr_floor)
-            if direction == 'long' and (stop_loss >= entry or take_profit <= entry):
-                return None, None, 0
-            if direction == 'short' and (stop_loss <= entry or take_profit >= entry):
-                return None, None, 0
-            risk = abs(entry - stop_loss)
-            reward = abs(take_profit - entry)
-            rr = reward / risk if risk > 0 else 0
-            return stop_loss, take_profit, rr
 
         # ICT SL Placement: Beyond the liquidity sweep level
         # This is the swing high/low that was swept before entry
@@ -3701,12 +3678,12 @@ class FlexibleICTStrategy:
         # Session hours enforced by advanced_filters.can_trade_now() (US30-aware).
         if self._is_us30(symbol):
             # US30 signal-generator mode (2026-03-15, 60-day backtest):
-            #   LIQ_SWEEP_ENGULF: 66.7% WR, PF 5.08 ✅  PRIMARY (13-15 UTC)
-            #   ORB_BREAKOUT:     27.3% WR raw — human trader filters false breakouts
+            #   LIQ_SWEEP_ENGULF:    66.7% WR, PF 5.08 ✅  PRIMARY (13-15 UTC)
+            #   SD_ZONE_FVG_REFILL:  Replaces ORB (2026-03-15) — pullback to S/D zone + FVG refill
             #   BREAKER_BLOCK / HTF_LIQUIDITY_BOS: DISABLED (0-17% WR on US30)
             options = [
                 lambda c, s=symbol: self.try_option_4(c, s),      # LIQ_SWEEP_ENGULF — primary
-                lambda c, s=symbol: self.try_option_8(c, s),      # ORB_BREAKOUT — human filters
+                lambda c, s=symbol: self.try_option_9(c, s),      # SD_ZONE_FVG_REFILL — replaces ORB
             ]
         else:
             # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
