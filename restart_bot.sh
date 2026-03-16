@@ -15,6 +15,25 @@ echo -e "${YELLOW}  RESTARTING FOREX TRADING BOT${NC}"
 echo "════════════════════════════════════════════════════════"
 echo ""
 
+# Pre-flight: ensure env file exists before restarting (prevents crash-loop)
+ENV_FILE="/home/vanhansen53/forex_trading_bot/forex-bot.env"
+if [ ! -f "$ENV_FILE" ]; then
+    echo -e "${RED}❌ Missing $ENV_FILE${NC}"
+    echo ""
+    echo "  The bot needs this file for WEBHOOK_SECRET and Telegram keys."
+    echo "  Run the setup script to create it:"
+    echo ""
+    echo "    bash scripts/setup_env.sh"
+    echo ""
+    exit 1
+fi
+# Verify WEBHOOK_SECRET is actually set (not blank or placeholder)
+if ! grep -q '^WEBHOOK_SECRET=.\{10,\}' "$ENV_FILE" || grep -q 'replace_with' "$ENV_FILE"; then
+    echo -e "${RED}❌ WEBHOOK_SECRET is missing or still a placeholder in $ENV_FILE${NC}"
+    echo "  Run: bash scripts/setup_env.sh"
+    exit 1
+fi
+
 # Also kill any orphan processes not managed by systemd
 pkill -f tradingview_webhook_server.py 2>/dev/null
 pkill -f live_data_poller.py 2>/dev/null

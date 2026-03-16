@@ -1,8 +1,8 @@
 #!/bin/bash
 # Startup script with Telegram alerts for start/stop events
 
-cd /home/juujuaddy/forex_trading_bot
-source /home/juujuaddy/forex_trading_bot/venv/bin/activate
+cd /home/vanhansen53/forex_trading_bot
+source /home/vanhansen53/.pyenv/versions/3.10.19/envs/forex-bot/bin/activate
 
 # Telegram configuration
 TELEGRAM_BOT_TOKEN="8001169647:AAESVk1NjD2ppFUHVDoPq_OamyGHx3gBUU0"
@@ -47,7 +47,7 @@ trap cleanup SIGTERM SIGINT SIGHUP
 send_telegram_alert "🟢 <b>Jarvis Bot Starting</b>%0A%0ATime: $(date '+%Y-%m-%d %H:%M:%S UTC')%0AStatus: Initializing webhook server and data poller..."
 
 echo "Starting webhook server and data poller..."
-python /home/juujuaddy/forex_trading_bot/scripts/tradingview_webhook_server.py &
+python /home/vanhansen53/forex_trading_bot/scripts/tradingview_webhook_server.py &
 WEBHOOK_PID=$!
 
 # Wait for webhook to start
@@ -61,7 +61,7 @@ else
 fi
 
 # Start poller (run in background so we can monitor both)
-python /home/juujuaddy/forex_trading_bot/scripts/live_data_poller.py &
+python /home/vanhansen53/forex_trading_bot/scripts/live_data_poller.py &
 POLLER_PID=$!
 
 # Health monitoring loop - check every 60 seconds

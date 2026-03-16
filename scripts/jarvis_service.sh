@@ -2,11 +2,11 @@
 # Jarvis Trading Bot Service Script
 # Used by systemd to run the bot as a background service
 
-BOT_DIR="/home/juujuaddy/forex_trading_bot"
+BOT_DIR="/home/vanhansen53/forex_trading_bot"
 cd "$BOT_DIR"
 
 # Activate virtual environment
-source venv/bin/activate
+source /home/vanhansen53/.pyenv/versions/3.10.19/envs/forex-bot/bin/activate
 
 # Create logs directory
 mkdir -p logs
