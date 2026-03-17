@@ -40,7 +40,8 @@ HEALTH_URL = "http://localhost:5000/health"
 DATA_URL = "http://localhost:5000/data"
 
 # Currency pairs to track (XAU_USD removed 2026-03-12: 17.6% WR, -1755 pips)
-PAIRS = ['EURUSD', 'GBPUSD']
+# US30 added 2026-03-17: 66.7% WR, PF 5.08 in 60-day backtest (NYSE open only 13-15 UTC)
+PAIRS = ['EURUSD', 'GBPUSD', 'US30']
 
 # Data freshness threshold (seconds)
 STALE_DATA_THRESHOLD = 300  # 5 minutes
@@ -165,7 +166,9 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
             'GBPUSD': 'GBPUSD=X',  # GBP/USD spot
             'USDJPY': 'USDJPY=X',  # USD/JPY spot
             'AUDUSD': 'AUDUSD=X',  # AUD/USD spot
-            'XAUUSD': 'GC=F'       # Gold futures (no spot ticker)
+            'XAUUSD': 'GC=F',      # Gold futures (no spot ticker)
+            'US30':   'YM=F',      # E-mini Dow Jones futures (US30)
+            'US_30':  'YM=F',      # Alt format
         }
         
         ticker_symbol = symbol_map.get(symbol, symbol)
@@ -177,11 +180,14 @@ def fetch_real_historical_data(symbol, interval='5m', period='1d'):
             logger.warning(f"  No data returned for {ticker_symbol} ({interval})")
             return []
         
-        # Convert to list of candles
+        # Convert to list of candles — use positional access to avoid Pylance
+        # typing issues with iterrows() which types idx as Hashable
         candles = []
-        for idx, row in df.iterrows():
+        timestamps = df.index.astype('int64') // 10**9  # nanoseconds → seconds
+        for i in range(len(df)):
+            row = df.iloc[i]
             candles.append({
-                'time': int(idx.timestamp()),
+                'time': int(timestamps[i]),
                 'open': float(row['Open']),
                 'high': float(row['High']),
                 'low': float(row['Low']),
@@ -398,10 +404,10 @@ def check_tradingview_data():
                                 age = now - latest
                                 if age < STALE_DATA_THRESHOLD:
                                     return True, age
-                return False, None
+                return False, 0.0
     except:
         pass
-    return False, None
+    return False, 0.0
 
 
 if __name__ == '__main__':
