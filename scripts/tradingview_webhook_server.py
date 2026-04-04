@@ -906,6 +906,36 @@ def webhook():
                             logger.info(f"📝 Recorded losing zone: {symbol} {direction} @ {entry:.5f}")
                         except Exception as e:
                             logger.warning(f"Could not record losing zone: {e}")
+
+                    # ── AUTO-LOG TO ML TRAINING DATA ──────────────────────────
+                    # Every verified win/loss feeds the ML model so it learns
+                    # over time which signals are winners vs losers (including
+                    # US30 LIQ_SWEEP_ENGULF and ORB_BREAKOUT).
+                    if ML_RISK_AVAILABLE and get_ml_risk_model and outcome in ('win', 'loss'):
+                        try:
+                            orig_signal = active_signals.get(sig_id, {})
+                            # Recover the market_context we cached at signal time
+                            ml_ctx = orig_signal.get('_ml_market_context', {})
+                            if not ml_ctx:
+                                # Fallback: rebuild a minimal context from trade data
+                                _sym_upper = symbol.upper()
+                                _is_us30_log = 'US30' in _sym_upper or 'US_30' in _sym_upper
+                                ml_ctx = {
+                                    'session': 'NYSE_OPEN' if _is_us30_log else 'LONDON',
+                                    'session_open_hour': 13 if _is_us30_log else 10,
+                                    'atr': 1.0,
+                                    'avg_atr': 1.0,
+                                    'trend_strength': 0.0,
+                                    'historical': {},
+                                }
+                            ml_model = get_ml_risk_model()
+                            ml_model.log_trade(orig_signal, ml_ctx, outcome, pips)
+                            logger.info(
+                                f"🤖 ML logged: {setup} {outcome} {pips:+.1f}pts | "
+                                f"total={len(ml_model.training_data)} samples"
+                            )
+                        except Exception as ml_err:
+                            logger.warning(f"ML auto-log error: {ml_err}")
                     
                     verify_tag = "🔍 VERIFIED" if verified else "⚠️ UNVERIFIED"
                     
@@ -985,28 +1015,59 @@ def webhook():
                     try:
                         # Build market context for ML from real candle data
                         current_hour = datetime.now(timezone.utc).hour
-                        if 14 <= current_hour < 17:
-                            session = 'OVERLAP' if current_hour < 16 else 'NY'
-                        elif 10 <= current_hour < 14:
-                            session = 'LONDON'
-                        elif 17 <= current_hour < 21:
-                            session = 'NY'
+                        current_minute = datetime.now(timezone.utc).minute
+                        _sym_upper = symbol.upper()
+                        _is_us30_sym = 'US30' in _sym_upper or 'US_30' in _sym_upper
+
+                        if _is_us30_sym:
+                            # US30 sessions: NYSE open window = 13:30–16:00 UTC
+                            if 13 <= current_hour < 16:
+                                session = 'NYSE_OPEN'
+                            elif 16 <= current_hour < 21:
+                                session = 'NY'
+                            else:
+                                session = 'OFF'
+                            session_open_hour = 13
                         else:
-                            session = 'OFF'
-                        
+                            # Forex sessions
+                            if 14 <= current_hour < 17:
+                                session = 'OVERLAP' if current_hour < 16 else 'NY'
+                            elif 10 <= current_hour < 14:
+                                session = 'LONDON'
+                            elif 17 <= current_hour < 21:
+                                session = 'NY'
+                            else:
+                                session = 'OFF'
+                            session_open_hour = 10
+
                         # Compute real ATR from 1H candles
                         atr_val, avg_atr_val = _compute_atr(mtf_data.get('1H', []), period=14)
                         # Compute real trend strength from 4H candles
                         trend_val = _compute_trend_strength(mtf_data.get('4H', []))
-                        
+
                         market_context = {
                             'session': session,
+                            'session_open_hour': session_open_hour,
                             'atr': atr_val,
                             'avg_atr': avg_atr_val,
                             'trend_strength': trend_val,
-                            'historical': _compute_ml_historical_stats(symbol, setup_name, current_hour)
+                            'historical': _compute_ml_historical_stats(symbol, setup_name, current_hour),
                         }
+
+                        # ── US30-specific context ──────────────────────────────
+                        if _is_us30_sym:
+                            # Pass ORB fields the strategy may have populated
+                            market_context['orb_range_pts'] = signal.get('orb_range_pts', 0)
+                            market_context['orb_breakout_dist_pts'] = signal.get('orb_breakout_dist_pts', 0)
+                            market_context['gap_size_pts'] = signal.get('gap_size_pts', 0)
+                            # 4H trend is same trend_val — surfaced separately for the model
+                            market_context['us30_4h_trend'] = trend_val
+
                         ml_score = ml_score_signal(signal, market_context)
+
+                        # Cache market_context on the signal so we can retrieve it
+                        # when the trade resolves and we need to log the ML training sample.
+                        signal['_ml_market_context'] = market_context
                         
                         # Add ML info to signal
                         signal['ml_confidence'] = ml_score.get('confidence', 50)

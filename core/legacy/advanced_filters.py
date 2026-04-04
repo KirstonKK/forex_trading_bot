@@ -565,12 +565,65 @@ class AdvancedFilters:
         #   01:00 (14%), 07:00 (10%), 14:00 (bad), 16-17 (0%), 20-21 (0%)
         # Good hours: 00 (75%), 08-10 (mixed), 13 (44%), 15 (60%), 18 (100%), 19
         # Conservative: stick to London + peak NY, skip dead zones
-        _allowed_hours = {8, 9, 10, 11, 12, 13, 15, 18, 19}
+        # US30 / index detection: check if we're being called for an index symbol
+        # The strategy passes symbol context through can_trade_now_symbol() if available.
+        # For backward compat, the basic can_trade_now() uses forex hours.
+        # US30 hours are handled by can_trade_now_us30() below.
+        # Tightened 2026-04-04: Hour 08 = 7.1% WR (1W/13L), Hour 11 = 0% WR
+        # London open (08:xx) is a trap — Asian sweep triggers false signals
+        # Hour 10 removed 2026-04-04: 33.3% WR (1W/2L) — dead zone between London & NY overlap
+        # Best hours: 09 (61.5%), 12 (72.7%), 13 (57.1%), 15 (62.5%), 18 (75%), 19 (66.7%)
+        _allowed_hours = {9, 12, 13, 15, 18, 19}
         if hour not in _allowed_hours:
-            return False, f"Outside quality hours ({hour:02d}:00 UTC — allowed: 08-13, 15, 18-19)"
+            return False, f"Outside quality hours ({hour:02d}:00 UTC — allowed: 09-10, 12-13, 15, 18-19)"
         
         return True, ''
     
+    def can_trade_now_us30(self, timestamp: int) -> Tuple[bool, str]:
+        """
+        Session filter for US30 (Dow Jones index).
+
+        TIGHTENED 2026-03-15 (backtest data: 18 trades over 60 days):
+          Hour 13 UTC: 50% WR — NYSE pre/open kill zone ✅ KEEP
+          Hour 14 UTC:  0% WR — all losses, removed ❌
+          Hour 15 UTC:  0% WR — all losses, removed ❌
+          Hour 16 UTC:  0% WR — all losses, removed ❌
+          Hour 17 UTC:  0% WR — all losses, removed ❌
+          Hour 18 UTC: 100% WR — only 1 trade (small sample), kept ✅
+          Hour 19 UTC:  0% WR — all losses, removed ❌
+
+        Only trading the NYSE open kill zone (13:00-14:59 UTC) where
+        the real institutional order flow happens. Mid/late session
+        signals are mostly chop and stop hunts.
+        """
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        weekday = dt.weekday()
+        hour = dt.hour
+
+        # Weekend check (same as forex)
+        if weekday == 5:
+            return False, "Weekend - market closed"
+        if weekday == 6 and hour < 22:
+            return False, "Sunday - market not yet open"
+        if weekday == 4 and hour >= 22:
+            return False, "Friday close - market closing"
+
+        # News check
+        is_news, news_reason = self.is_news_time(timestamp)
+        if is_news:
+            return False, f"News event: {news_reason}"
+
+        # US30 signal-generator mode: 13-15 UTC
+        # Hour 13: 75% WR — NYSE pre-open kill zone (best)
+        # Hour 14: ORB forms 13:30-14:00, breakout at 14:xx — human reviews
+        # Hour 15: Silver bullet continuation — human reviews
+        # Hours 16-19: excluded (0% WR historically)
+        _us30_allowed_hours = {13, 14, 15}
+        if hour not in _us30_allowed_hours:
+            return False, f"US30: Outside NYSE session ({hour:02d}:00 UTC — allowed: 13-15 UTC)"
+
+        return True, ''
+
     def get_current_session(self, timestamp: int) -> str:
         """
         Get the current trading session name.

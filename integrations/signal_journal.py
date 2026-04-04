@@ -28,8 +28,8 @@ PIP_VALUES = {
 
 # yfinance ticker mapping
 TICKER_MAP = {
-    'EUR_USD': '6E=F', 'GBP_USD': '6B=F', 'XAU_USD': 'GC=F',
-    'EURUSD': '6E=F', 'GBPUSD': '6B=F', 'XAUUSD': 'GC=F',
+    'EUR_USD': 'EURUSD=X', 'GBP_USD': 'GBPUSD=X', 'XAU_USD': 'GC=F',
+    'EURUSD': 'EURUSD=X', 'GBPUSD': 'GBPUSD=X', 'XAUUSD': 'GC=F',
 }
 
 

@@ -36,11 +36,20 @@ FEATURE_STATS_FILE = ML_DIR / 'feature_stats.json'
 class FeatureExtractor:
     """Extract ML features from trade setup data."""
     
+    # All known setup types (ordered — index / max used for encoding)
+    SETUP_TYPES = [
+        'OPTION_1', 'OPTION_2', 'OPTION_3',
+        'OPTION_4', 'LIQ_SWEEP_ENGULF',        # US30 primary
+        'OPTION_5', 'OPTION_6',
+        'OPTION_7', 'BREAKER_BLOCK',
+        'OPTION_8', 'ORB_BREAKOUT',             # US30 opening range
+    ]
+
     # Feature definitions with normalization ranges
     FEATURE_SCHEMA = {
         # Setup features
         'confirmation_count': {'min': 1, 'max': 6, 'default': 3},
-        'setup_type': {'options': ['OPTION_1', 'OPTION_2', 'OPTION_3'], 'default': 0},
+        'setup_type': {'min': 0, 'max': 1, 'default': 0},
         'has_choch': {'boolean': True, 'default': 0},
         'has_bos': {'boolean': True, 'default': 0},
         'has_fvg': {'boolean': True, 'default': 0},
@@ -48,25 +57,40 @@ class FeatureExtractor:
         'has_liquidity_sweep': {'boolean': True, 'default': 0},
         'fvg_size_pct': {'min': 0, 'max': 2.0, 'default': 0.5},
         'ob_strength': {'min': 0, 'max': 1.0, 'default': 0.5},
-        'distance_to_sl_pips': {'min': 5, 'max': 100, 'default': 20},
-        
+        'distance_to_sl_pips': {'min': 5, 'max': 500, 'default': 20},
+
         # Market context
         'atr_normalized': {'min': 0, 'max': 2.0, 'default': 1.0},
-        'session': {'options': ['LONDON', 'NY', 'OVERLAP', 'OFF'], 'default': 0},
+        'session': {'min': 0, 'max': 1, 'default': 0},
         'trend_strength': {'min': -1, 'max': 1, 'default': 0},
         'hours_since_session_open': {'min': 0, 'max': 8, 'default': 3},
         'day_of_week': {'min': 0, 'max': 4, 'default': 2},
-        
+
         # HTF alignment
         'htf_bias_aligned': {'boolean': True, 'default': 1},
         'htf_in_zone': {'boolean': True, 'default': 0},
         'mtf_alignment_score': {'min': 0, 'max': 1, 'default': 0.5},
-        
+
         # Historical performance (rolling)
         'pair_win_rate_10': {'min': 0, 'max': 1, 'default': 0.6},
         'hour_win_rate': {'min': 0, 'max': 1, 'default': 0.6},
         'setup_type_win_rate': {'min': 0, 'max': 1, 'default': 0.6},
         'streak': {'min': -5, 'max': 5, 'default': 0},  # Negative = losing streak
+
+        # ── US30 / ORB-specific features ──────────────────────────────────────
+        # These are 0 for all forex signals (no penalty — tree models handle sparsity).
+        'is_us30': {'boolean': True, 'default': 0},
+        'is_orb_setup': {'boolean': True, 'default': 0},
+        # ORB range size in points (normalized 0-1 over 0–500 pt range)
+        'orb_range_pts': {'min': 0, 'max': 500, 'default': 0},
+        # How far price broke beyond the ORB boundary before our entry (0-200 pts)
+        'orb_breakout_dist_pts': {'min': 0, 'max': 200, 'default': 0},
+        # Overnight gap size in points (|today open − yesterday close|)
+        'gap_size_pts': {'min': 0, 'max': 300, 'default': 0},
+        # NYSE open proximity: minutes elapsed since 13:30 UTC (0 = right at open)
+        'mins_since_nyse_open': {'min': 0, 'max': 90, 'default': 45},
+        # 4H trend strength specifically for US30 (reused trend_strength for forex)
+        'us30_4h_trend': {'min': -1, 'max': 1, 'default': 0},
     }
     
     def __init__(self):
@@ -107,77 +131,123 @@ class FeatureExtractor:
         
         # === Setup Features ===
         confirmations = signal_data.get('confirmations', [])
-        features['confirmation_count'] = self._normalize(
-            len(confirmations), 1, 6
-        )
-        
-        # Setup type (one-hot encoded as single value)
+        features['confirmation_count'] = self._normalize(len(confirmations), 1, 6)
+
+        # Setup type — encoded as position in SETUP_TYPES list (0-1).
+        # Handles all known option names including US30 aliases.
         setup_type = signal_data.get('setup_type', 'OPTION_1')
-        setup_options = ['OPTION_1', 'OPTION_2', 'OPTION_3']
-        features['setup_type'] = setup_options.index(setup_type) / 2.0 if setup_type in setup_options else 0
-        
+        max_idx = max(len(self.SETUP_TYPES) - 1, 1)
+        if setup_type in self.SETUP_TYPES:
+            features['setup_type'] = self.SETUP_TYPES.index(setup_type) / max_idx
+        else:
+            features['setup_type'] = 0.0
+
         # Boolean confirmations
-        features['has_choch'] = 1.0 if 'CHOCH' in confirmations else 0.0
-        features['has_bos'] = 1.0 if 'BOS' in confirmations else 0.0
-        features['has_fvg'] = 1.0 if 'FVG' in confirmations else 0.0
-        features['has_ob'] = 1.0 if 'OB' in confirmations else 0.0
-        features['has_liquidity_sweep'] = 1.0 if 'SWEEP' in confirmations or 'LIQ' in str(confirmations) else 0.0
-        
+        confirmations_str = str(confirmations).upper()
+        features['has_choch'] = 1.0 if 'CHOCH' in confirmations_str else 0.0
+        features['has_bos'] = 1.0 if 'BOS' in confirmations_str else 0.0
+        features['has_fvg'] = 1.0 if 'FVG' in confirmations_str else 0.0
+        features['has_ob'] = 1.0 if any(x in confirmations_str for x in ('OB', 'ORDER_BLOCK')) else 0.0
+        features['has_liquidity_sweep'] = 1.0 if any(x in confirmations_str for x in ('SWEEP', 'LIQ')) else 0.0
+
         # FVG size (if available)
         fvg_size = signal_data.get('fvg_size_pct', 0.5)
         features['fvg_size_pct'] = self._normalize(fvg_size, 0, 2.0)
-        
+
         # OB strength
         ob_strength = signal_data.get('ob_strength', 0.5)
         features['ob_strength'] = self._normalize(ob_strength, 0, 1.0)
-        
-        # Distance to SL in pips
+
+        # Distance to SL — use points for US30, pips for forex
+        symbol = signal_data.get('symbol', 'EURUSD')
         entry = signal_data.get('entry_price', 0)
         sl = signal_data.get('stop_loss', 0)
+        _is_us30 = 'US30' in symbol.upper() or 'US_30' in symbol.upper()
         if entry and sl:
             sl_distance = abs(entry - sl)
-            # Convert to pips (forex = *10000, gold = *10)
-            symbol = signal_data.get('symbol', 'EURUSD')
-            multiplier = 10 if 'XAU' in symbol else 10000
-            sl_pips = sl_distance * multiplier
-            features['distance_to_sl_pips'] = self._normalize(sl_pips, 5, 100)
+            if _is_us30:
+                sl_units = sl_distance  # already in points
+            elif 'XAU' in symbol.upper():
+                sl_units = sl_distance * 10
+            else:
+                sl_units = sl_distance * 10000  # forex pips
+            features['distance_to_sl_pips'] = self._normalize(sl_units, 5, 500)
         else:
             features['distance_to_sl_pips'] = 0.5
-        
+
         # === Market Context ===
         # ATR normalization (1.0 = average volatility)
         atr = market_context.get('atr', 1.0)
         avg_atr = market_context.get('avg_atr', atr)
         features['atr_normalized'] = self._normalize(atr / avg_atr if avg_atr else 1.0, 0.5, 2.0)
-        
-        # Session
+
+        # Session (forex: LONDON/NY/OVERLAP/OFF; US30: NYSE_OPEN or same)
         session = market_context.get('session', 'LONDON')
-        session_options = ['LONDON', 'NY', 'OVERLAP', 'OFF']
-        features['session'] = session_options.index(session) / 3.0 if session in session_options else 0.33
-        
+        session_options = ['LONDON', 'NYSE_OPEN', 'NY', 'OVERLAP', 'OFF']
+        if session in session_options:
+            features['session'] = session_options.index(session) / (len(session_options) - 1)
+        else:
+            features['session'] = 0.33
+
         # Trend strength (-1 to 1)
         trend = market_context.get('trend_strength', 0)
         features['trend_strength'] = self._normalize(trend, -1, 1)
-        
+
         # Time features
         now = datetime.utcnow()
-        session_start = 10  # 10:00 UTC
+        session_start = market_context.get('session_open_hour', 10)  # 13 for US30, 10 for forex
         hours_active = max(0, min(7, now.hour - session_start))
         features['hours_since_session_open'] = self._normalize(hours_active, 0, 7)
         features['day_of_week'] = self._normalize(now.weekday(), 0, 4)
-        
+
         # === HTF Alignment ===
         features['htf_bias_aligned'] = 1.0 if signal_data.get('htf_aligned', True) else 0.0
         features['htf_in_zone'] = 1.0 if signal_data.get('in_htf_zone', False) else 0.0
         features['mtf_alignment_score'] = signal_data.get('mtf_score', 0.5)
-        
+
         # === Historical Performance ===
         hist = market_context.get('historical', {})
         features['pair_win_rate_10'] = hist.get('pair_win_rate', 0.6)
         features['hour_win_rate'] = hist.get('hour_win_rate', 0.6)
         features['setup_type_win_rate'] = hist.get('setup_win_rate', 0.6)
         features['streak'] = self._normalize(hist.get('streak', 0), -5, 5)
-        
+
+        # === US30 / ORB-specific Features ===
+        _is_orb = setup_type in ('OPTION_8', 'ORB_BREAKOUT')
+        features['is_us30'] = 1.0 if _is_us30 else 0.0
+        features['is_orb_setup'] = 1.0 if _is_orb else 0.0
+
+        if _is_us30:
+            # ORB range size in points (high - low of first 30min)
+            orb_range = market_context.get('orb_range_pts', signal_data.get('orb_range_pts', 0))
+            features['orb_range_pts'] = self._normalize(orb_range, 0, 500)
+
+            # How far breakout extended beyond the ORB boundary
+            orb_break = market_context.get('orb_breakout_dist_pts',
+                                           signal_data.get('orb_breakout_dist_pts', 0))
+            features['orb_breakout_dist_pts'] = self._normalize(orb_break, 0, 200)
+
+            # Overnight gap size (|today open − yesterday close|)
+            gap = market_context.get('gap_size_pts', signal_data.get('gap_size_pts', 0))
+            features['gap_size_pts'] = self._normalize(gap, 0, 300)
+
+            # Minutes elapsed since NYSE open (13:30 UTC)
+            nyse_open_minutes = now.hour * 60 + now.minute - (13 * 60 + 30)
+            mins_since = max(0, min(90, nyse_open_minutes))
+            features['mins_since_nyse_open'] = self._normalize(mins_since, 0, 90)
+
+            # 4H trend (separate from forex trend_strength so model can distinguish)
+            features['us30_4h_trend'] = self._normalize(
+                market_context.get('us30_4h_trend', trend), -1, 1
+            )
+        else:
+            # Zero out US30-only features for forex signals
+            features['orb_range_pts'] = 0.0
+            features['orb_breakout_dist_pts'] = 0.0
+            features['gap_size_pts'] = 0.0
+            features['mins_since_nyse_open'] = 0.0
+            features['us30_4h_trend'] = 0.0
+
         return features
     
     def _normalize(self, value: float, min_val: float, max_val: float) -> float:

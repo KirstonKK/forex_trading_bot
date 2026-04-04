@@ -60,6 +60,8 @@ class SetupType(Enum):
     OPTION_4 = "LIQ_SWEEP_ENGULF"   # Liquidity Sweep + Engulfing (price action)
     OPTION_5 = "ICT_SWEEP_CONFIRM"  # Sweep + BOS + iFVG + SMT + 79% ext (full ICT model)
     OPTION_6 = "ZONE_OB_FIB_SWEEP"  # Corrected consolidation of Opt 2+3 (zone + OB/FVG + Fib + sweep)
+    OPTION_7 = "BREAKER_BLOCK"      # Failed S/D zone flip — US30 specific
+    OPTION_9 = "SD_ZONE_FVG_REFILL" # Supply/Demand zone + FVG refill entry — US30
 
 
 @dataclass
@@ -253,13 +255,24 @@ class FlexibleICTStrategy:
             import logging
             logging.getLogger('strategy').warning(f"Could not save signal state: {e}")
     
+    # ===== US30 / INDEX HELPERS =====
+    _US30_SYMBOLS = {'US30', 'US_30', 'YM', 'YM=F', '^DJI', 'DJI'}
+
+    def _is_us30(self, symbol: str = None) -> bool:
+        """Check if symbol is US30 (Dow Jones index)."""
+        sym = (symbol or self.current_symbol).replace('_', '').upper()
+        return sym in self._US30_SYMBOLS or 'US30' in sym or sym in ('YM', 'YMF', 'DJI')
+
     def get_pip_value(self, symbol: str = None) -> float:
         """
         Get pip value for the symbol.
         - Forex pairs (EURUSD, GBPUSD): 0.0001 (4th decimal)
         - Gold (XAUUSD): 0.10 ($0.10 per point)
+        - US30 (Dow Jones): 1.0 (whole points)
         """
         sym = symbol or self.current_symbol
+        if self._is_us30(sym):
+            return 1.0  # US30 moves in whole points
         if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
             return 0.10  # Gold moves in $0.10 increments
         return 0.0001  # Standard forex pairs
@@ -269,8 +282,11 @@ class FlexibleICTStrategy:
         Get point value for the symbol (smaller unit for SL/TP calculations).
         - Forex pairs: 0.00001 (5th decimal)
         - Gold: 0.01 ($0.01)
+        - US30: 0.1 (tenth of a point)
         """
         sym = symbol or self.current_symbol
+        if self._is_us30(sym):
+            return 0.1  # US30 point value
         if sym in ['XAUUSD', 'XAU_USD', 'GOLD']:
             return 0.01  # Gold point value
         return 0.00001  # Standard forex pairs
@@ -431,7 +447,15 @@ class FlexibleICTStrategy:
         
         pip_value = self.get_pip_value(symbol)
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
-        zone_tolerance = 50 * pip_value if not is_gold else 20.0  # 50 pips forex, $20 gold
+        is_us30 = self._is_us30(symbol)
+        # US30: 100 points tolerance (index moves ~300-500 pts/day)
+        # Forex: 50 pips, Gold: $20
+        if is_us30:
+            zone_tolerance = 100.0  # 100 points for US30
+        elif is_gold:
+            zone_tolerance = 20.0
+        else:
+            zone_tolerance = 50 * pip_value
         expiry = 24 * 3600  # 24 hours
         
         for loss in losses:
@@ -525,7 +549,14 @@ class FlexibleICTStrategy:
         return True
     
     def determine_htf_trend(self, candles: List[dict], timeframe: int = 240) -> TrendDirection:
-        """Determine HTF trend (4H or 1H) using actual HTF data."""
+        """Determine HTF trend (4H or 1H) using actual HTF data.
+        
+        Two-layer approach:
+        1. HH/HL counting (primary) — clear directional bias
+        2. EMA cross tiebreaker — when HH/HL scores are close,
+           use fast vs slow moving average to break the tie.
+        Only returns RANGING when both methods disagree.
+        """
         # Use actual MTF data if available
         if self.mtf_data:
             candles_htf = self.get_htf_candles(timeframe)
@@ -539,6 +570,7 @@ class FlexibleICTStrategy:
         recent = candles_htf[-20:]
         highs = [c['high'] for c in recent]
         lows = [c['low'] for c in recent]
+        closes = [c['close'] for c in recent]
         
         # Count higher highs/higher lows vs lower highs/lower lows
         hh_count = sum(1 for i in range(5, len(highs)) if highs[i] > max(highs[i-5:i]))
@@ -549,10 +581,23 @@ class FlexibleICTStrategy:
         bullish_score = hh_count + hl_count
         bearish_score = lh_count + ll_count
         
+        # Primary: clear directional bias (15% stronger)
         if bullish_score > bearish_score * 1.15:
             return TrendDirection.BULLISH
         elif bearish_score > bullish_score * 1.15:
             return TrendDirection.BEARISH
+        
+        # Tiebreaker: EMA cross — fast (last 8) vs slow (all 20)
+        # If both HH/HL lean AND EMA agrees, call it directional.
+        ema_fast = sum(closes[-8:]) / 8
+        ema_slow = sum(closes) / len(closes)
+        ema_bullish = ema_fast > ema_slow
+        
+        if bullish_score > bearish_score and ema_bullish:
+            return TrendDirection.BULLISH
+        elif bearish_score > bullish_score and not ema_bullish:
+            return TrendDirection.BEARISH
+        
         return TrendDirection.RANGING
     
     def find_htf_zones(self, candles: List[dict], timeframe: int = 240) -> List[HTFZone]:
@@ -1053,145 +1098,6 @@ class FlexibleICTStrategy:
             'order_block': entry_ob,
             'fvg': entry_fvg,
             'htf_zone': None
-        }
-    
-    def try_option_2(self, candles: List[dict], symbol: str) -> Optional[Dict]:
-        """
-        Option 2: HTF Zone + OB + ChoCH
-        Requirements:
-        - Price taps HTF zone (4H/1H) ✅
-        - OB on 5M aligned with HTF zone ✅
-        - ChoCH on LTF ✅
-        """
-        confirmations = []
-        
-        # 1. HTF Zones
-        htf_zones_4h = self.find_htf_zones(candles, 240)
-        htf_zones_1h = self.find_htf_zones(candles, 60)
-        htf_zones = htf_zones_4h + htf_zones_1h
-        
-        if not htf_zones:
-            return None
-        
-        current_price = candles[-1]['close']
-        tapped_zone = None
-        
-        for zone in htf_zones:
-            if self.price_in_zone(current_price, zone.high, zone.low):
-                tapped_zone = zone
-                break
-        
-        if not tapped_zone:
-            return None
-        
-        confirmations.append("HTF_ZONE")
-        direction = 'long' if tapped_zone.zone_type == 'demand' else 'short'
-        
-        # 2. 5M OB aligned with zone
-        order_blocks_5m = self.find_order_blocks(candles, 5)
-        aligned_ob = None
-        
-        for ob in order_blocks_5m:
-            if ob.direction == ('bullish' if direction == 'long' else 'bearish'):
-                # Check if OB is within or near HTF zone
-                if (ob.low <= tapped_zone.high and ob.high >= tapped_zone.low):
-                    aligned_ob = ob
-                    break
-        
-        if not aligned_ob:
-            return None
-        
-        confirmations.append("OB_5M")
-        
-        # 3. ChoCH
-        has_choch = self.check_choch(candles, direction)
-        if not has_choch:
-            return None
-        
-        confirmations.append("CHOCH")
-        
-        # Bonus: check liquidity sweep (not required)
-        has_sweep, _ = self.check_liquidity_sweep(candles, symbol)
-        
-        return {
-            'setup_type': SetupType.OPTION_2,
-            'direction': direction,
-            'confirmations': confirmations,
-            'htf_trend': None,  # Not required for this setup
-            'has_liquidity_sweep': has_sweep,
-            'has_bos': False,
-            'has_choch': True,
-            'asian_sweep': False,
-            'order_block': aligned_ob,
-            'fvg': None,
-            'htf_zone': tapped_zone
-        }
-    
-    def try_option_3(self, candles: List[dict]) -> Optional[Dict]:
-        """
-        Option 3: OB + FVG + Fib 79%
-        
-        Precision Entry Model:
-        - 5M OB exists ✅
-        - FVG overlapping the OB ✅
-        - 79% Fib retracement ✅
-        - Price is AT the OB/FVG zone (entry) ✅
-        """
-        confirmations = []
-        current_price = candles[-1]['close']
-        
-        # 1. Find 5M OBs
-        order_blocks_5m = self.find_order_blocks(candles, 5)
-        if not order_blocks_5m:
-            return None
-        
-        # Find OB that price is currently tapping
-        tapped_ob = None
-        for ob in order_blocks_5m:
-            if ob.low <= current_price <= ob.high:
-                tapped_ob = ob
-                break
-        
-        if not tapped_ob:
-            return None  # Price not at OB yet
-        
-        confirmations.append("OB_5M")
-        direction = 'long' if tapped_ob.direction == 'bullish' else 'short'
-        
-        # 2. Find FVGs overlapping this OB
-        fvgs = self.find_fvgs(candles)
-        overlapping_fvg = self.check_ob_fvg_overlap(tapped_ob, fvgs)
-        
-        if not overlapping_fvg:
-            return None
-        
-        confirmations.append("FVG")
-        
-        # 3. Check 79% Fib
-        ob_mid = (tapped_ob.high + tapped_ob.low) / 2
-        has_fib = self.check_fib_confluence(candles, ob_mid, direction)
-        
-        if not has_fib:
-            return None
-        
-        confirmations.append("FIB_79")
-        
-        # Bonus: HTF bias (preferred but not mandatory)
-        htf_trend = self.determine_htf_trend(candles, 240)
-        
-        return {
-            'setup_type': SetupType.OPTION_3,
-            'direction': direction,
-            'confirmations': confirmations,
-            'htf_trend': htf_trend if htf_trend != TrendDirection.RANGING else None,
-            'has_liquidity_sweep': False,
-            'has_bos': False,
-            'has_choch': False,
-            'asian_sweep': False,
-            'order_block': tapped_ob,
-            'fvg': overlapping_fvg,
-            'htf_zone': None,
-            'has_fib_confluence': True
         }
     
     def detect_engulfing(self, candles: List[dict], timeframe: int = 15) -> Optional[dict]:
@@ -2830,6 +2736,458 @@ class FlexibleICTStrategy:
             'htf_zone': tapped_zone,
         }
 
+    # ====================================================================
+    # OPTION 7: BREAKER BLOCK — US30 Specific
+    # Failed S/D zone that flips polarity after being broken through.
+    #
+    # ICT Breaker Block concept:
+    #   1. A valid HTF supply/demand zone is formed (strong impulse candle)
+    #   2. Price CLOSES THROUGH the zone boundary (the zone "breaks")
+    #   3. The broken zone FLIPS — old demand becomes supply, old supply becomes demand
+    #   4. Price RETESTS the flipped zone (comes back to where it was)
+    #   5. At the retest: BOS or engulfing CONFIRMS rejection from the flipped zone
+    #   6. HTF 4H + 1H must align with trade direction
+    #   7. SL placed beyond the far side of the old zone boundary
+    # ====================================================================
+
+    def try_option_7(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+        """
+        Option 7: Breaker Block — Failed S/D Zone Flip (US30 Specific)
+
+        A Breaker Block forms when a HTF supply or demand zone is broken through
+        (price closes beyond it), which "breaks" the zone. The old zone then flips
+        polarity and acts as resistance (was demand) or support (was supply).
+
+        Steps:
+        1. Find all validated HTF zones (4H + 1H) from recent data
+        2. For each zone, check if price has CLOSED THROUGH the zone boundary
+           - Demand zone broken: candle closes BELOW zone low → flips to supply
+           - Supply zone broken: candle closes ABOVE zone high → flips to demand
+        3. After the break, check if price has RETESTED the old zone (price returned
+           to within the zone boundaries)
+        4. At retest: require BOS or engulfing candle as confirmation
+        5. Both 4H and 1H trend must align with the flipped direction
+        6. SL = beyond the far edge of the original zone
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        confirmations = []
+
+        # ====== STEP 1: Find HTF zones (wider lookback for US30 — index zones last longer) ======
+        # Use raw find_htf_zones (not the strict validated version) to find more zones for US30
+        candles_htf_4h = self.get_htf_candles(240) if self.mtf_data else self.filters.get_timeframe_data(candles, 240)
+        candles_htf_1h = self.get_htf_candles(60) if self.mtf_data else self.filters.get_timeframe_data(candles, 60)
+
+        # Use wider lookback for US30 since we need the zone BEFORE the break
+        # We look at raw HTF candles and manually scan for the zone + break + retest pattern
+        all_htf_candles = []
+        if len(candles_htf_4h) >= 10:
+            all_htf_candles = candles_htf_4h[-40:]  # Last 40 4H candles (~1 week)
+        elif len(candles_htf_1h) >= 20:
+            all_htf_candles = candles_htf_1h[-60:]  # Last 60 1H candles (~2.5 days)
+        else:
+            self._last_rejection_reasons.append("Opt7: Insufficient HTF data for Breaker Block scan")
+            return None
+
+        pip_value = self.get_pip_value(symbol)
+        point_value = self.get_point_value(symbol)
+        current_price = candles[-1]['close']
+
+        # ====== STEP 2: Scan for broken zones ======
+        # A zone is: a strong impulse candle followed by 2+ candles that confirm the move
+        # A "break" is: a later candle CLOSES beyond the zone boundary
+
+        avg_body = sum(abs(c['close'] - c['open']) for c in all_htf_candles) / len(all_htf_candles)
+        min_body = avg_body * 1.2  # Zone-forming candle must be at least 1.2x avg (slightly looser for US30)
+
+        breaker_zones = []  # List of dicts: zone info + break info + flip direction
+
+        for i in range(len(all_htf_candles) - 6):
+            zone_candle = all_htf_candles[i]
+            body = abs(zone_candle['close'] - zone_candle['open'])
+            if body < min_body:
+                continue
+
+            # ── Demand zone candidate: strong bullish candle ──
+            if zone_candle['close'] > zone_candle['open']:
+                zone_high = zone_candle['close']
+                zone_low = zone_candle['low']
+
+                # Confirm: next 2 candles also bullish and close above zone
+                next_2 = all_htf_candles[i+1:i+3]
+                if not (len(next_2) >= 2 and all(c['close'] > zone_high for c in next_2)):
+                    continue
+
+                # Look for a break: candle CLOSES BELOW zone_low after zone formed
+                zone_broken_idx = None
+                for j in range(i+2, len(all_htf_candles)):
+                    if all_htf_candles[j]['close'] < zone_low:
+                        zone_broken_idx = j
+                        break
+
+                if zone_broken_idx is None:
+                    continue  # Zone never broken, not a breaker block
+
+                # Flip: broken demand → now acts as SUPPLY → short signal
+                breaker_zones.append({
+                    'zone_high': zone_high,
+                    'zone_low': zone_low,
+                    'original_type': 'demand',
+                    'flipped_type': 'supply',     # Resistance now
+                    'direction': 'short',          # We want to SHORT into this zone
+                    'break_idx': zone_broken_idx,
+                    'zone_candle_idx': i,
+                    'sl_level': zone_high,         # SL beyond top of old demand zone
+                })
+
+            # ── Supply zone candidate: strong bearish candle ──
+            elif zone_candle['close'] < zone_candle['open']:
+                zone_high = zone_candle['open']
+                zone_low = zone_candle['close']
+
+                # Confirm: next 2 candles also bearish and close below zone
+                next_2 = all_htf_candles[i+1:i+3]
+                if not (len(next_2) >= 2 and all(c['close'] < zone_low for c in next_2)):
+                    continue
+
+                # Look for a break: candle CLOSES ABOVE zone_high after zone formed
+                zone_broken_idx = None
+                for j in range(i+2, len(all_htf_candles)):
+                    if all_htf_candles[j]['close'] > zone_high:
+                        zone_broken_idx = j
+                        break
+
+                if zone_broken_idx is None:
+                    continue  # Zone never broken
+
+                # Flip: broken supply → now acts as DEMAND → long signal
+                breaker_zones.append({
+                    'zone_high': zone_high,
+                    'zone_low': zone_low,
+                    'original_type': 'supply',
+                    'flipped_type': 'demand',     # Support now
+                    'direction': 'long',           # We want to LONG off this zone
+                    'break_idx': zone_broken_idx,
+                    'zone_candle_idx': i,
+                    'sl_level': zone_low,          # SL beyond bottom of old supply zone
+                })
+
+        if not breaker_zones:
+            self._last_rejection_reasons.append("Opt7: No broken HTF zones found (no Breaker Blocks)")
+            return None
+
+        # ====== STEP 3: Check if price has RETESTED the breaker zone ======
+        # Price must come BACK INTO the old zone after the break
+        # For shorts (was demand): price returns up to zone_low–zone_high from below
+        # For longs (was supply):  price returns down to zone_low–zone_high from above
+
+        zone_buffer = 50.0  # 50 points tolerance for US30 retest (index is noisy)
+        valid_retest_zones = []
+
+        for bz in breaker_zones:
+            # Price must currently be within or near the old zone boundary
+            # Short setup: current price is back in the old demand zone range
+            if bz['direction'] == 'short':
+                # Price should be at or near the zone from below (retesting as resistance)
+                if (bz['zone_low'] - zone_buffer) <= current_price <= (bz['zone_high'] + zone_buffer):
+                    valid_retest_zones.append(bz)
+            else:  # Long setup
+                # Price should be at or near the zone from above (retesting as support)
+                if (bz['zone_low'] - zone_buffer) <= current_price <= (bz['zone_high'] + zone_buffer):
+                    valid_retest_zones.append(bz)
+
+        if not valid_retest_zones:
+            self._last_rejection_reasons.append(
+                f"Opt7: Found {len(breaker_zones)} Breaker Block zone(s) but price not at retest"
+                f" (price={current_price:.1f})")
+            return None
+
+        # Use the most recent breaker zone (highest break_idx)
+        best_zone = max(valid_retest_zones, key=lambda z: z['break_idx'])
+        direction = best_zone['direction']
+        _log.info(
+            f"🧱 [{symbol}] Opt7: Breaker Block found — {best_zone['original_type']} "
+            f"zone [{best_zone['zone_low']:.1f}–{best_zone['zone_high']:.1f}] "
+            f"broken & retested. Signal: {direction}"
+        )
+
+        confirmations.append(f"BREAKER_BLOCK_{best_zone['original_type'].upper()}_FLIP")
+
+        # ====== STEP 4: Require BOS or Engulfing at retest ======
+        # Price retesting the zone must show rejection — not just touching it
+        has_bos = self.check_bos(candles, direction)
+        engulfing = self.detect_engulfing(candles, timeframe=15)
+        engulfing_confirmed = engulfing and engulfing['direction'] == direction
+
+        if has_bos:
+            confirmations.append("BOS_AT_RETEST")
+            self._last_bos_found = True
+        if engulfing_confirmed:
+            confirmations.append("ENGULF_AT_RETEST")
+
+        if not has_bos and not engulfing_confirmed:
+            self._last_rejection_reasons.append(
+                "Opt7: Price at breaker zone but no BOS or engulfing confirmation at retest")
+            return None
+
+        # ====== STEP 5: HTF Trend Alignment ======
+        # Both 4H and 1H must agree with trade direction
+        htf_trend_4h = self.determine_htf_trend(candles, 240)
+        htf_trend_1h = self.determine_htf_trend(candles, 60)
+
+        if htf_trend_4h == TrendDirection.RANGING or htf_trend_1h == TrendDirection.RANGING:
+            self._last_rejection_reasons.append(
+                f"Opt7: HTF ranging — need aligned 4H+1H for Breaker Block")
+            return None
+        if htf_trend_4h != htf_trend_1h:
+            self._last_rejection_reasons.append(
+                f"Opt7: HTF conflict (4H={htf_trend_4h.value}, 1H={htf_trend_1h.value})")
+            return None
+
+        expected_trend = TrendDirection.BEARISH if direction == 'short' else TrendDirection.BULLISH
+        if htf_trend_4h != expected_trend:
+            self._last_rejection_reasons.append(
+                f"Opt7: Counter-trend ({direction} vs HTF={htf_trend_4h.value})")
+            return None
+
+        confirmations.append("HTF_4H_1H_ALIGNED")
+
+        # ====== STEP 6: ChoCH (bonus) ======
+        has_choch = self.check_choch(candles, direction)
+        if has_choch:
+            confirmations.append("CHOCH")
+
+        # Minimum confirmation check
+        if len(confirmations) < 3:
+            self._last_rejection_reasons.append(
+                f"Opt7: Only {len(confirmations)}/3 confirmations ({', '.join(confirmations)})")
+            return None
+
+        _log.info(
+            f"✅ [{symbol}] Option 7 (Breaker Block) HIT: {direction} | "
+            f"Zone: {best_zone['zone_low']:.1f}–{best_zone['zone_high']:.1f} | "
+            f"Confirms: {', '.join(confirmations)}"
+        )
+
+        return {
+            'setup_type': SetupType.OPTION_7,
+            'direction': direction,
+            'confirmations': confirmations,
+            'htf_trend': htf_trend_4h,
+            'has_liquidity_sweep': True,   # Zone break IS the sweep/manipulation
+            'has_bos': has_bos,
+            'has_choch': has_choch,
+            'has_fib_confluence': False,
+            'asian_sweep': False,
+            'order_block': None,
+            'fvg': None,
+            'htf_zone': HTFZone(
+                high=best_zone['zone_high'],
+                low=best_zone['zone_low'],
+                timeframe='4H',
+                zone_type=best_zone['flipped_type']
+            ),
+            '_breaker_sl_level': best_zone['sl_level'],   # Used by calculate_sl_tp for SL
+        }
+
+    # ====================================================================
+    # OPTION 9: SUPPLY/DEMAND ZONE + FVG REFILL — US30
+    #
+    # Replaces ORB (2026-03-15). ORB chased breakouts into chop (60% wrong
+    # direction). This setup does the opposite — waits for price to PULL BACK
+    # to a validated S/D zone where an FVG was created on the impulse away,
+    # then enters as price refills that FVG inside the zone.
+    #
+    # Why this works for US30:
+    #   - Institutional order flow creates clear S/D zones on 1H
+    #   - The impulse away from the zone leaves an FVG (unfilled orders)
+    #   - Price returns to fill the FVG = institutions re-entering at discount/premium
+    #   - Entry is at a defined structural level with clear invalidation (zone boundary)
+    #
+    # Rules:
+    #   1. Find a validated 1H S/D zone (strong impulse candle, not mitigated)
+    #   2. Find an FVG created on the MOVE AWAY from that zone (within 10 candles)
+    #   3. Current price must be INSIDE the FVG (refilling it)
+    #   4. FVG must be AT or OVERLAPPING the S/D zone
+    #   5. 4H trend must align with zone direction (no counter-trend)
+    #   6. Rejection candle at the FVG (wick showing zone respect)
+    #   7. SL = beyond zone boundary + 50pt buffer
+    # ====================================================================
+
+    def try_option_9(self, candles: List[dict], symbol: str) -> Optional[Dict]:
+        """
+        Option 9: Supply/Demand Zone + FVG Refill — US30
+
+        Waits for price to pull back to a validated 1H S/D zone where an FVG
+        was created on the impulse away, then enters as price refills the FVG.
+
+        This is a REVERSION setup (opposite of ORB breakout chasing).
+        Entry is at a structural discount/premium with defined invalidation.
+        """
+        import logging
+        _log = logging.getLogger('strategy')
+        confirmations = []
+
+        current_price = candles[-1]['close']
+        current_candle = candles[-1]
+
+        # ====== STEP 1: Find validated 1H S/D zones ======
+        # Use 1H zones (not 4H) — US30 intraday zones are on 1H
+        candles_1h = self.get_htf_candles(60) if self.mtf_data else []
+        if len(candles_1h) < 20:
+            self._last_rejection_reasons.append("Opt9: Insufficient 1H data for S/D zone detection")
+            return None
+
+        # Find zones using the validated detector (requires strong impulse + not mitigated)
+        zones_1h = self._find_validated_htf_zones(candles, 60)
+        zones_4h = self._find_validated_htf_zones(candles, 240)
+        all_zones = zones_1h + zones_4h
+
+        if not all_zones:
+            self._last_rejection_reasons.append("Opt9: No validated S/D zones on 1H/4H")
+            return None
+
+        # ====== STEP 2: Find FVGs created on the move AWAY from each zone ======
+        # For a DEMAND zone: the impulse away is BULLISH → creates a BULLISH FVG above zone
+        # For a SUPPLY zone: the impulse away is BEARISH → creates a BEARISH FVG below zone
+        # We need the FVG to be NEAR the zone (within the zone or just above/below it)
+
+        # Use quality FVGs (minimum size, still open)
+        quality_fvgs = self._find_quality_fvgs(candles)
+
+        # US30-specific: use wider tolerance for zone/FVG overlap (index is noisy)
+        zone_fvg_tolerance = 80.0  # 80 points — US30 zones can be wide
+
+        matched_zone = None
+        matched_fvg = None
+        direction = None
+
+        for zone in all_zones:
+            expected_fvg_dir = 'bullish' if zone.zone_type == 'demand' else 'bearish'
+            trade_dir = 'long' if zone.zone_type == 'demand' else 'short'
+
+            for fvg in quality_fvgs:
+                if fvg.direction != expected_fvg_dir:
+                    continue
+
+                # FVG must overlap with or be just above/below the zone
+                # For demand zone: FVG should be at or above zone high (impulse up created it)
+                # For supply zone: FVG should be at or below zone low (impulse down created it)
+                if zone.zone_type == 'demand':
+                    fvg_near_zone = fvg.bottom <= zone.high + zone_fvg_tolerance
+                else:
+                    fvg_near_zone = fvg.top >= zone.low - zone_fvg_tolerance
+
+                if not fvg_near_zone:
+                    continue
+
+                # ====== STEP 3: Current price must be INSIDE the FVG (refilling) ======
+                price_in_fvg = fvg.bottom <= current_price <= fvg.top
+
+                if not price_in_fvg:
+                    continue
+
+                # Found a match!
+                matched_zone = zone
+                matched_fvg = fvg
+                direction = trade_dir
+                break
+
+            if matched_zone:
+                break
+
+        if not matched_zone or not matched_fvg or direction is None:
+            self._last_rejection_reasons.append(
+                "Opt9: No S/D zone with FVG refill at current price")
+            return None
+
+        # direction is guaranteed non-None from here
+        trade_direction: str = direction
+
+        confirmations.append(f"SD_ZONE_{matched_zone.zone_type.upper()}_{matched_zone.timeframe}")
+        confirmations.append(f"FVG_REFILL_{matched_fvg.direction.upper()}")
+
+        # ====== STEP 4: 4H trend alignment ======
+        htf_trend_4h = self.determine_htf_trend(candles, 240)
+        if htf_trend_4h == TrendDirection.RANGING:
+            # Ranging 4H is OK for S/D — zones work in ranging markets too
+            pass
+        elif (htf_trend_4h == TrendDirection.BEARISH and trade_direction == 'long') or \
+             (htf_trend_4h == TrendDirection.BULLISH and trade_direction == 'short'):
+            self._last_rejection_reasons.append(
+                f"Opt9: Counter-trend blocked (4H={htf_trend_4h.value}, signal={trade_direction})")
+            return None
+
+        if htf_trend_4h != TrendDirection.RANGING:
+            confirmations.append(f"HTF_4H_{htf_trend_4h.value.upper()}_ALIGNED")
+
+        # ====== STEP 5: Rejection candle at the FVG ======
+        # The current candle should show a wick indicating zone respect
+        body_size = abs(current_candle['close'] - current_candle['open'])
+        upper_wick = current_candle['high'] - max(current_candle['open'], current_candle['close'])
+        lower_wick = min(current_candle['open'], current_candle['close']) - current_candle['low']
+
+        # US30: use 5-point minimum wick (index candles are larger than forex)
+        min_wick = 5.0
+
+        if trade_direction == 'long':
+            # For LONG at demand zone: want lower wick (buyers stepping in)
+            if lower_wick >= min_wick or lower_wick >= body_size * 0.3:
+                confirmations.append("REJECTION_WICK")
+            # Also accept a bullish close (close > open) as confirmation
+            elif current_candle['close'] > current_candle['open']:
+                confirmations.append("BULLISH_CLOSE")
+        else:
+            # For SHORT at supply zone: want upper wick (sellers stepping in)
+            if upper_wick >= min_wick or upper_wick >= body_size * 0.3:
+                confirmations.append("REJECTION_WICK")
+            elif current_candle['close'] < current_candle['open']:
+                confirmations.append("BEARISH_CLOSE")
+
+        # ====== STEP 6: BOS or ChoCH (bonus — adds confidence) ======
+        has_bos = self.check_bos(candles, direction)
+        has_choch = self.check_choch(candles, direction)
+        if has_bos:
+            confirmations.append("BOS")
+            self._last_bos_found = True
+        if has_choch:
+            confirmations.append("CHOCH")
+
+        # Minimum confirmation gate
+        if len(confirmations) < 3:
+            self._last_rejection_reasons.append(
+                f"Opt9: Only {len(confirmations)}/3 confirmations ({', '.join(confirmations)})")
+            return None
+
+        _log.info(
+            f"✅ [{symbol}] Option 9 (SD_ZONE_FVG_REFILL) HIT: {direction} | "
+            f"Zone: {matched_zone.zone_type} [{matched_zone.low:.0f}–{matched_zone.high:.0f}] | "
+            f"FVG: [{matched_fvg.bottom:.0f}–{matched_fvg.top:.0f}] | "
+            f"Confirms: {', '.join(confirmations)}"
+        )
+
+        return {
+            'setup_type': SetupType.OPTION_9,
+            'direction': direction,
+            'confirmations': confirmations,
+            'htf_trend': htf_trend_4h if htf_trend_4h != TrendDirection.RANGING else None,
+            'has_liquidity_sweep': False,
+            'has_bos': has_bos,
+            'has_choch': has_choch,
+            'has_fib_confluence': False,
+            'asian_sweep': False,
+            'order_block': None,
+            'fvg': FVG(
+                top=matched_fvg.top,
+                bottom=matched_fvg.bottom,
+                timestamp=matched_fvg.timestamp,
+                direction=matched_fvg.direction
+            ),
+            'htf_zone': matched_zone,
+            # SL hint: beyond zone boundary
+            '_zone_sl_level': matched_zone.low if direction == 'long' else matched_zone.high,
+        }
+
     def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
         """
         Find the NEAREST swing pivot for SL placement.
@@ -2902,6 +3260,8 @@ class FlexibleICTStrategy:
         is_long = direction == 'long'
         setup_type = setup_data['setup_type'].value if hasattr(setup_data['setup_type'], 'value') else str(setup_data['setup_type'])
         
+        is_us30 = self._is_us30(symbol)
+
         # ICT SL Placement: Beyond the liquidity sweep level
         # This is the swing high/low that was swept before entry
         # Pass setup_type to use tighter structure for HTF_LIQUIDITY_BOS
@@ -2958,7 +3318,26 @@ class FlexibleICTStrategy:
         # Max SL limits - different for Gold vs Forex
         # Gold SL widened 2026-02-25: $10-15 min was too tight for $5200 gold,
         # normal intraday ATR is $25-40. Bot kept getting stopped out by noise.
-        if is_gold:
+        is_us30 = self._is_us30(symbol)
+        if is_us30:
+            # US30: SL in index points (40-120 typical range)
+            # point_value = 0.1, so 40 points = 400 point_value units
+            # Widened 2026-03-15: backtest showed 6/7 losses hit exactly -80pt cap,
+            # direction was correct but SL too tight — price swept through then reversed.
+            atr_multiplier = 2.0  # US30 needs 2x ATR for SL
+            # min_sl raised from 40pts (400) → 80pts (800) on 2026-03-15
+            # Backtest showed 2/3 losses were SL-noise hits at the 40pt floor.
+            # US30 typically moves 30-50pts in random noise at the open — need 80pt buffer.
+            if setup_type == 'HTF_LIQUIDITY_BOS':
+                max_sl_points = 1200  # 120 points max
+                min_sl_points = 800   # 80 points min (was 400/40pts — too tight, noise hits)
+            elif setup_type == 'BREAKER_BLOCK':
+                max_sl_points = 1200  # 120 points max
+                min_sl_points = 800   # 80 points min
+            else:
+                max_sl_points = 1200  # 120 points max
+                min_sl_points = 800   # 80 points min
+        elif is_gold:
             if setup_type == 'HTF_LIQUIDITY_BOS':
                 max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS (was $20)
                 min_sl_points = 2000   # $20 min (was $10)
@@ -2969,9 +3348,11 @@ class FlexibleICTStrategy:
             # Forex: Tighter SL = better R:R, pivot-based placement is precise
             if setup_type == 'HTF_LIQUIDITY_BOS':
                 max_sl_points = 120  # 12 pips max for HTF_LIQUIDITY_BOS
-                min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+                min_sl_points = 70   # 7 pips min (was 50/5p — too tight, noise stops)
             elif setup_type in ('LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
-                max_sl_points = 150  # 15 pips max for sweep-based setups
+                # Tightened 2026-04-04: trades hitting 15-pip cap always lose
+                # 12-pip max forces higher quality setups only
+                max_sl_points = 120  # 12 pips max (was 150/15p — cap hits = weak setups)
                 min_sl_points = 70   # 7 pips min
             elif setup_type == 'ZONE_OB_FIB_SWEEP':
                 max_sl_points = 170  # 17 pips max for Option 6
@@ -3033,11 +3414,16 @@ class FlexibleICTStrategy:
         # Setup-specific MAX RR caps (tightened 2026-03-12)
         # LIQ_SWEEP_ENGULF was hitting 8:1 and 15:1 targets that never filled
         # Cap it to 3:1 max — engulfing setups don't have the momentum for big runs
+        # Tightened 2026-04-04: HTF_LIQUIDITY_BOS at 5:1 had ~10% WR — targets too far
+        # Data: All HTF_LIQUIDITY_BOS 5:1 trades lost. 3:1 max viable for both.
+        # RR caps tightened 2026-04-04: LIQ_SWEEP_ENGULF at 1:3 = 50% WR (6W/6L)
+        # At 1:2.0-2.2 the same setup = 84%+ WR. Cap at 2.5 — closer TP hit more often.
+        # HTF_LIQUIDITY_BOS capped to 2.5: the one 1:3 trade was loss, 1:2.0-2.2 all won.
         setup_max_rr = {
-            'LIQ_SWEEP_ENGULF': 3.0,   # Was 8-15, never filled. Cap to 3:1
+            'LIQ_SWEEP_ENGULF': 2.5,   # Was 3.0 (50% WR), tightened — 2.0-2.2 = 84%+ WR
             'ICT_SWEEP_CONFIRM': 4.0,   # Cap at 4:1 (was 5:1, tightened)
             'ZONE_OB_FIB_SWEEP': 4.0,   # Same
-            'HTF_LIQUIDITY_BOS': 5.0,   # Cap at 5:1 (was uncapped)
+            'HTF_LIQUIDITY_BOS': 2.5,   # Was 3.0, all 3.0 trades lost. 2.0-2.2 = 80%+ WR
         }
         max_rr_for_setup = min(setup_max_rr.get(setup_type, global_max_rr), global_max_rr)
         
@@ -3248,7 +3634,11 @@ class FlexibleICTStrategy:
             current_timestamp = int(datetime.now(timezone.utc).timestamp())
         
         # ===== SESSION CHECK FIRST - Must be in trading hours =====
-        can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
+        # US30 uses different session hours (NYSE: 13-19 UTC) vs forex (08-19 UTC)
+        if self._is_us30(symbol):
+            can_trade, session_reason = self.filters.can_trade_now_us30(current_timestamp)
+        else:
+            can_trade, session_reason = self.filters.can_trade_now(current_timestamp)
         if not can_trade:
             self._last_rejection_reasons.append(f"Outside trading session: {session_reason}")
             return None
@@ -3308,13 +3698,29 @@ class FlexibleICTStrategy:
         #   - ICT_SWEEP_CONFIRM kept but shorts blocked below
         #   - HTF_LIQUIDITY_BOS on EUR+GBP: 16W/23L = 41% WR — the backbone
         #   - LIQ_SWEEP_ENGULF: 20.8% WR overall but 58.8% in backtests — keep as #1
-        # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
-        options = [
-            lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1
-            self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
-            lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — #3 (shorts blocked below)
-            # ZONE_OB_FIB_SWEEP (Opt 6) DISABLED: 1W/4L = 20% WR, PBO=noise
-        ]
+        # ===== US30 ROUTING (isolated from forex) =====
+        # US30 uses its own setup priority waterfall:
+        #   Option 4 (Sweep + Engulf) → Option 1 (HTF + Sweep + BoS) → Option 5 (no SMT)
+        # Breaker Block (Opt 7) added later after backtest validation.
+        # US30 has no correlated pair → SMT is skipped in Option 5.
+        # Session hours enforced by advanced_filters.can_trade_now() (US30-aware).
+        if self._is_us30(symbol):
+            # US30 signal-generator mode (2026-03-15, 60-day backtest):
+            #   LIQ_SWEEP_ENGULF:    66.7% WR, PF 5.08 ✅  PRIMARY (13-15 UTC)
+            #   SD_ZONE_FVG_REFILL:  Replaces ORB (2026-03-15) — pullback to S/D zone + FVG refill
+            #   BREAKER_BLOCK / HTF_LIQUIDITY_BOS: DISABLED (0-17% WR on US30)
+            options = [
+                lambda c, s=symbol: self.try_option_4(c, s),      # LIQ_SWEEP_ENGULF — primary
+                lambda c, s=symbol: self.try_option_9(c, s),      # SD_ZONE_FVG_REFILL — replaces ORB
+            ]
+        else:
+            # EUR & GBP: Hardened Opt4 first, then Opt1 (backbone), then Opt5 (longs only)
+            options = [
+                lambda c, s=symbol: self.try_option_4(c, s),          # LIQ_SWEEP_ENGULF — #1
+                self.try_option_1,                                    # HTF_LIQUIDITY_BOS — #2 (backbone)
+                lambda c, s=symbol: self.try_option_5(c, s),          # ICT_SWEEP_CONFIRM — #3 (shorts blocked below)
+                # ZONE_OB_FIB_SWEEP (Opt 6) DISABLED for forex: 1W/4L = 20% WR, PBO=noise
+            ]
         
         setup_data = None
         for option_func in options:
@@ -3356,6 +3762,25 @@ class FlexibleICTStrategy:
                 "ICT_SWEEP_CONFIRM shorts BLOCKED: 0W/5L = 0% WR")
             _log.info(f"🚫 [{symbol}] Rejected: ICT_SWEEP_CONFIRM shorts disabled")
             return None
+        
+        # ===== HTF_LIQUIDITY_BOS RESTRICTIONS (added 2026-04-04) =====
+        # Hour restriction: Only profitable at NY open (12-13 UTC)
+        # Symbol restriction: EUR_USD = 80% WR (4W/1L), GBP_USD = 25% WR (1W/3L)
+        # GBP too volatile for HTF liquidity sweeps — institutional flow less predictable
+        if setup_type_check == SetupType.OPTION_1:
+            trade_hour = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).hour
+            htf_bos_allowed_hours = {12, 13}  # NY open only
+            htf_bos_allowed_symbols = {'EUR_USD', 'EURUSD'}  # Most liquid pair only
+            if trade_hour not in htf_bos_allowed_hours:
+                self._last_rejection_reasons.append(
+                    f"HTF_LIQUIDITY_BOS restricted to NY open (12-13 UTC), current={trade_hour:02d}")
+                _log.info(f"🚫 [{symbol}] Rejected: HTF_LIQUIDITY_BOS outside NY hours")
+                return None
+            if symbol not in htf_bos_allowed_symbols:
+                self._last_rejection_reasons.append(
+                    f"HTF_LIQUIDITY_BOS restricted to EUR_USD (GBP 25% WR)")
+                _log.info(f"🚫 [{symbol}] Rejected: HTF_LIQUIDITY_BOS non-EUR pair")
+                return None
         
         # ===== NEW FILTERS =====
         
@@ -3401,7 +3826,19 @@ class FlexibleICTStrategy:
         # Check confirmation count (tightened 2026-03-07)
         confirmation_count = len(setup_data['confirmations'])
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
-        min_confirmations = 4 if is_gold else 3  # Gold needs 4+, forex needs 3+
+        direction = setup_data['direction']
+        # Long (counter-trend) trades need 5+ confirmations — 4-conf longs = 33% WR
+        # Short (with-trend) trades need 3+. Gold always needs 4+.
+        # Hour 09 (early London): 4-conf = 33% WR, 5-conf = 71% WR — volatile hour needs more proof
+        if is_gold:
+            min_confirmations = 4
+        elif direction == 'long':
+            min_confirmations = 5  # Counter-trend needs stronger confirmation
+        else:
+            min_confirmations = 3
+        trade_hour_check = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).hour
+        if trade_hour_check == 9 and min_confirmations < 5:
+            min_confirmations = 5  # Early London volatile — 4-conf = 33% WR at this hour
         if confirmation_count < min_confirmations:
             self._last_rejection_reasons.append(
                 f"Insufficient confirmations ({confirmation_count}/{min_confirmations} required"
@@ -3443,8 +3880,8 @@ class FlexibleICTStrategy:
         # Record trade for daily cap tracking
         self.record_trade(symbol)
         
-        # Record signal time for cooldown tracking
-        self._last_signal_time[symbol] = current_timestamp
+        # Record signal time for cooldown tracking (normalize key to match check_signal_cooldown)
+        self._last_signal_time[self._normalize_symbol(symbol)] = current_timestamp
         
         # Persist state to disk so cooldowns survive restarts
         self._save_state()

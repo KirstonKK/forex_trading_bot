@@ -356,8 +356,8 @@ def main():
 
     # Map symbols to yfinance tickers
     yf_map = {
-        'EUR_USD': '6E=F',
-        'GBP_USD': '6B=F',
+        'EUR_USD': 'EURUSD=X',
+        'GBP_USD': 'GBPUSD=X',
         'XAU_USD': 'GC=F',
     }
 
