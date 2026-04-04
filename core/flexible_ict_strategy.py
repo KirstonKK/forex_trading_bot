@@ -549,7 +549,14 @@ class FlexibleICTStrategy:
         return True
     
     def determine_htf_trend(self, candles: List[dict], timeframe: int = 240) -> TrendDirection:
-        """Determine HTF trend (4H or 1H) using actual HTF data."""
+        """Determine HTF trend (4H or 1H) using actual HTF data.
+        
+        Two-layer approach:
+        1. HH/HL counting (primary) — clear directional bias
+        2. EMA cross tiebreaker — when HH/HL scores are close,
+           use fast vs slow moving average to break the tie.
+        Only returns RANGING when both methods disagree.
+        """
         # Use actual MTF data if available
         if self.mtf_data:
             candles_htf = self.get_htf_candles(timeframe)
@@ -563,6 +570,7 @@ class FlexibleICTStrategy:
         recent = candles_htf[-20:]
         highs = [c['high'] for c in recent]
         lows = [c['low'] for c in recent]
+        closes = [c['close'] for c in recent]
         
         # Count higher highs/higher lows vs lower highs/lower lows
         hh_count = sum(1 for i in range(5, len(highs)) if highs[i] > max(highs[i-5:i]))
@@ -573,10 +581,23 @@ class FlexibleICTStrategy:
         bullish_score = hh_count + hl_count
         bearish_score = lh_count + ll_count
         
+        # Primary: clear directional bias (15% stronger)
         if bullish_score > bearish_score * 1.15:
             return TrendDirection.BULLISH
         elif bearish_score > bullish_score * 1.15:
             return TrendDirection.BEARISH
+        
+        # Tiebreaker: EMA cross — fast (last 8) vs slow (all 20)
+        # If both HH/HL lean AND EMA agrees, call it directional.
+        ema_fast = sum(closes[-8:]) / 8
+        ema_slow = sum(closes) / len(closes)
+        ema_bullish = ema_fast > ema_slow
+        
+        if bullish_score > bearish_score and ema_bullish:
+            return TrendDirection.BULLISH
+        elif bearish_score > bullish_score and not ema_bullish:
+            return TrendDirection.BEARISH
+        
         return TrendDirection.RANGING
     
     def find_htf_zones(self, candles: List[dict], timeframe: int = 240) -> List[HTFZone]:
@@ -3327,9 +3348,11 @@ class FlexibleICTStrategy:
             # Forex: Tighter SL = better R:R, pivot-based placement is precise
             if setup_type == 'HTF_LIQUIDITY_BOS':
                 max_sl_points = 120  # 12 pips max for HTF_LIQUIDITY_BOS
-                min_sl_points = 50   # 5 pips min for HTF_LIQUIDITY_BOS
+                min_sl_points = 70   # 7 pips min (was 50/5p — too tight, noise stops)
             elif setup_type in ('LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
-                max_sl_points = 150  # 15 pips max for sweep-based setups
+                # Tightened 2026-04-04: trades hitting 15-pip cap always lose
+                # 12-pip max forces higher quality setups only
+                max_sl_points = 120  # 12 pips max (was 150/15p — cap hits = weak setups)
                 min_sl_points = 70   # 7 pips min
             elif setup_type == 'ZONE_OB_FIB_SWEEP':
                 max_sl_points = 170  # 17 pips max for Option 6
@@ -3391,11 +3414,16 @@ class FlexibleICTStrategy:
         # Setup-specific MAX RR caps (tightened 2026-03-12)
         # LIQ_SWEEP_ENGULF was hitting 8:1 and 15:1 targets that never filled
         # Cap it to 3:1 max — engulfing setups don't have the momentum for big runs
+        # Tightened 2026-04-04: HTF_LIQUIDITY_BOS at 5:1 had ~10% WR — targets too far
+        # Data: All HTF_LIQUIDITY_BOS 5:1 trades lost. 3:1 max viable for both.
+        # RR caps tightened 2026-04-04: LIQ_SWEEP_ENGULF at 1:3 = 50% WR (6W/6L)
+        # At 1:2.0-2.2 the same setup = 84%+ WR. Cap at 2.5 — closer TP hit more often.
+        # HTF_LIQUIDITY_BOS capped to 2.5: the one 1:3 trade was loss, 1:2.0-2.2 all won.
         setup_max_rr = {
-            'LIQ_SWEEP_ENGULF': 3.0,   # Was 8-15, never filled. Cap to 3:1
+            'LIQ_SWEEP_ENGULF': 2.5,   # Was 3.0 (50% WR), tightened — 2.0-2.2 = 84%+ WR
             'ICT_SWEEP_CONFIRM': 4.0,   # Cap at 4:1 (was 5:1, tightened)
             'ZONE_OB_FIB_SWEEP': 4.0,   # Same
-            'HTF_LIQUIDITY_BOS': 5.0,   # Cap at 5:1 (was uncapped)
+            'HTF_LIQUIDITY_BOS': 2.5,   # Was 3.0, all 3.0 trades lost. 2.0-2.2 = 80%+ WR
         }
         max_rr_for_setup = min(setup_max_rr.get(setup_type, global_max_rr), global_max_rr)
         
@@ -3735,6 +3763,25 @@ class FlexibleICTStrategy:
             _log.info(f"🚫 [{symbol}] Rejected: ICT_SWEEP_CONFIRM shorts disabled")
             return None
         
+        # ===== HTF_LIQUIDITY_BOS RESTRICTIONS (added 2026-04-04) =====
+        # Hour restriction: Only profitable at NY open (12-13 UTC)
+        # Symbol restriction: EUR_USD = 80% WR (4W/1L), GBP_USD = 25% WR (1W/3L)
+        # GBP too volatile for HTF liquidity sweeps — institutional flow less predictable
+        if setup_type_check == SetupType.OPTION_1:
+            trade_hour = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).hour
+            htf_bos_allowed_hours = {12, 13}  # NY open only
+            htf_bos_allowed_symbols = {'EUR_USD', 'EURUSD'}  # Most liquid pair only
+            if trade_hour not in htf_bos_allowed_hours:
+                self._last_rejection_reasons.append(
+                    f"HTF_LIQUIDITY_BOS restricted to NY open (12-13 UTC), current={trade_hour:02d}")
+                _log.info(f"🚫 [{symbol}] Rejected: HTF_LIQUIDITY_BOS outside NY hours")
+                return None
+            if symbol not in htf_bos_allowed_symbols:
+                self._last_rejection_reasons.append(
+                    f"HTF_LIQUIDITY_BOS restricted to EUR_USD (GBP 25% WR)")
+                _log.info(f"🚫 [{symbol}] Rejected: HTF_LIQUIDITY_BOS non-EUR pair")
+                return None
+        
         # ===== NEW FILTERS =====
         
         # 0. Losing zone filter — don't re-enter same price zone that just lost
@@ -3779,7 +3826,19 @@ class FlexibleICTStrategy:
         # Check confirmation count (tightened 2026-03-07)
         confirmation_count = len(setup_data['confirmations'])
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
-        min_confirmations = 4 if is_gold else 3  # Gold needs 4+, forex needs 3+
+        direction = setup_data['direction']
+        # Long (counter-trend) trades need 5+ confirmations — 4-conf longs = 33% WR
+        # Short (with-trend) trades need 3+. Gold always needs 4+.
+        # Hour 09 (early London): 4-conf = 33% WR, 5-conf = 71% WR — volatile hour needs more proof
+        if is_gold:
+            min_confirmations = 4
+        elif direction == 'long':
+            min_confirmations = 5  # Counter-trend needs stronger confirmation
+        else:
+            min_confirmations = 3
+        trade_hour_check = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).hour
+        if trade_hour_check == 9 and min_confirmations < 5:
+            min_confirmations = 5  # Early London volatile — 4-conf = 33% WR at this hour
         if confirmation_count < min_confirmations:
             self._last_rejection_reasons.append(
                 f"Insufficient confirmations ({confirmation_count}/{min_confirmations} required"
@@ -3821,8 +3880,8 @@ class FlexibleICTStrategy:
         # Record trade for daily cap tracking
         self.record_trade(symbol)
         
-        # Record signal time for cooldown tracking
-        self._last_signal_time[symbol] = current_timestamp
+        # Record signal time for cooldown tracking (normalize key to match check_signal_cooldown)
+        self._last_signal_time[self._normalize_symbol(symbol)] = current_timestamp
         
         # Persist state to disk so cooldowns survive restarts
         self._save_state()

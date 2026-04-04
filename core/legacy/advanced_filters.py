@@ -569,9 +569,13 @@ class AdvancedFilters:
         # The strategy passes symbol context through can_trade_now_symbol() if available.
         # For backward compat, the basic can_trade_now() uses forex hours.
         # US30 hours are handled by can_trade_now_us30() below.
-        _allowed_hours = {8, 9, 10, 11, 12, 13, 15, 18, 19}
+        # Tightened 2026-04-04: Hour 08 = 7.1% WR (1W/13L), Hour 11 = 0% WR
+        # London open (08:xx) is a trap — Asian sweep triggers false signals
+        # Hour 10 removed 2026-04-04: 33.3% WR (1W/2L) — dead zone between London & NY overlap
+        # Best hours: 09 (61.5%), 12 (72.7%), 13 (57.1%), 15 (62.5%), 18 (75%), 19 (66.7%)
+        _allowed_hours = {9, 12, 13, 15, 18, 19}
         if hour not in _allowed_hours:
-            return False, f"Outside quality hours ({hour:02d}:00 UTC — allowed: 08-13, 15, 18-19)"
+            return False, f"Outside quality hours ({hour:02d}:00 UTC — allowed: 09-10, 12-13, 15, 18-19)"
         
         return True, ''
     
