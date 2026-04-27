@@ -43,7 +43,7 @@ from core.legacy.advanced_filters import AdvancedFilters
 try:
     from integrations.news_filter import is_news_blackout
 except ImportError:
-    def is_news_blackout(symbol=None):
+    def is_news_blackout(_symbol=None):
         return (False, None)  # No blocking if module not found
 
 
@@ -400,7 +400,7 @@ class FlexibleICTStrategy:
         
         self._save_state()
     
-    def record_win(self, symbol: str = None):
+    def record_win(self, _symbol: str = None):
         """
         Record a winning trade. Resets consecutive loss counter.
         Called when a trade hits TP.
@@ -1260,11 +1260,11 @@ class FlexibleICTStrategy:
         htf_trend_1h = self.determine_htf_trend(candles, 60)
         if htf_trend == TrendDirection.RANGING or htf_trend is None:
             self._last_rejection_reasons.append(
-                f"Opt4: 4H ranging/unclear — need aligned trend for engulfing setup")
+                "Opt4: 4H ranging/unclear — need aligned trend for engulfing setup")
             return None
         if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
             self._last_rejection_reasons.append(
-                f"Opt4: 1H ranging/unclear — need both 4H+1H aligned")
+                "Opt4: 1H ranging/unclear — need both 4H+1H aligned")
             return None
         if htf_trend != htf_trend_1h:
             self._last_rejection_reasons.append(
@@ -1282,11 +1282,11 @@ class FlexibleICTStrategy:
         # Verify HTF alignment with engulfing direction
         if htf_trend == TrendDirection.BULLISH and direction == 'short':
             self._last_rejection_reasons.append(
-                f"Opt4: Counter-trend rejected (4H=bullish, engulfing=short)")
+                "Opt4: Counter-trend rejected (4H=bullish, engulfing=short)")
             return None
         if htf_trend == TrendDirection.BEARISH and direction == 'long':
             self._last_rejection_reasons.append(
-                f"Opt4: Counter-trend rejected (4H=bearish, engulfing=long)")
+                "Opt4: Counter-trend rejected (4H=bearish, engulfing=long)")
             return None
         
         confirmations.append("15M_ENGULFING")
@@ -1298,10 +1298,8 @@ class FlexibleICTStrategy:
         
         if has_sweep:
             # Verify sweep direction matches engulfing
-            if direction == 'long' and sweep_type == 'low':
-                confirmations.append("LIQUIDITY_SWEEP")
-                self._last_sweep_found = True
-            elif direction == 'short' and sweep_type == 'high':
+            if (direction == 'long' and sweep_type == 'low') or \
+               (direction == 'short' and sweep_type == 'high'):
                 confirmations.append("LIQUIDITY_SWEEP")
                 self._last_sweep_found = True
             else:
@@ -1311,11 +1309,8 @@ class FlexibleICTStrategy:
         if not has_sweep:
             liq_zone = self.find_5m_liquidity_zone(candles)
             if liq_zone and liq_zone.get('swept'):
-                if direction == 'long' and liq_zone['type'] == 'low':
-                    confirmations.append("5M_LIQ_ZONE_SWEEP")
-                    self._last_sweep_found = True
-                    has_sweep = True
-                elif direction == 'short' and liq_zone['type'] == 'high':
+                if (direction == 'long' and liq_zone['type'] == 'low') or \
+                   (direction == 'short' and liq_zone['type'] == 'high'):
                     confirmations.append("5M_LIQ_ZONE_SWEEP")
                     self._last_sweep_found = True
                     has_sweep = True
@@ -1440,7 +1435,6 @@ class FlexibleICTStrategy:
 
         now_utc = datetime.now(timezone.utc)
         today_midnight = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday_midnight = today_midnight.replace(day=today_midnight.day - 1) if today_midnight.day > 1 else today_midnight
 
         for c in candles_1h:
             ts = datetime.fromtimestamp(c['timestamp'], tz=timezone.utc)
@@ -1624,7 +1618,7 @@ class FlexibleICTStrategy:
 
     # --- SMT Divergence ---
 
-    def detect_smt_divergence(self, candles_5m: List[dict], symbol: str,
+    def detect_smt_divergence(self, _candles_5m: List[dict], symbol: str,
                                sweep_info: dict) -> Optional[dict]:
         """
         Smart Money Technique (SMT) Divergence.
@@ -1652,11 +1646,9 @@ class FlexibleICTStrategy:
         recent_corr = corr_candles[-15:] if len(corr_candles) >= 15 else corr_candles
 
         sweep_dir = sweep_info['direction']
-        sweep_level = sweep_info['level']
 
         if sweep_dir == 'long':
             # Our pair swept a LOW → check if correlated pair also made a new low
-            our_low = min(c['low'] for c in candles_5m[-15:])
             corr_low = min(c['low'] for c in recent_corr)
             # Correlated pair should NOT have made a lower low in the same window
             # We check: did correlated pair's recent low hold above its prior swing low?
@@ -1837,7 +1829,7 @@ class FlexibleICTStrategy:
             'range': rng,
         }
 
-    def price_at_79(self, current_price: float, fib_data: dict, direction: str,
+    def price_at_79(self, current_price: float, fib_data: dict, _direction: str,
                      symbol: str) -> bool:
         """Check if price is near the 79% level (within 5 pips / $3 for gold)."""
         pip_value = self.get_pip_value(symbol)
@@ -1962,9 +1954,8 @@ class FlexibleICTStrategy:
         fvgs = self.find_fvgs(candles_5m)
         for fvg in fvgs:
             mid = (fvg.top + fvg.bottom) / 2
-            if direction == 'long' and fvg.direction == 'bearish' and mid > current_price + min_dist:
-                raw.append((mid, 'unfilled_fvg'))
-            elif direction == 'short' and fvg.direction == 'bullish' and mid < current_price - min_dist:
+            if (direction == 'long' and fvg.direction == 'bearish' and mid > current_price + min_dist) or \
+               (direction == 'short' and fvg.direction == 'bullish' and mid < current_price - min_dist):
                 raw.append((mid, 'unfilled_fvg'))
 
         # --- SOURCE 4: 4H swing levels (major structure) ---
@@ -2111,11 +2102,11 @@ class FlexibleICTStrategy:
         htf_trend_1h = self.determine_htf_trend(candles_5m, 60)
         if htf_trend_4h == TrendDirection.RANGING or htf_trend_4h is None:
             self._last_rejection_reasons.append(
-                f"Opt5: 4H ranging/unclear — need both 4H+1H aligned")
+                "Opt5: 4H ranging/unclear — need both 4H+1H aligned")
             return None
         if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
             self._last_rejection_reasons.append(
-                f"Opt5: 1H ranging/unclear — need both 4H+1H aligned")
+                "Opt5: 1H ranging/unclear — need both 4H+1H aligned")
             return None
         if htf_trend_4h != htf_trend_1h:
             self._last_rejection_reasons.append(
@@ -2243,10 +2234,9 @@ class FlexibleICTStrategy:
             has_continuation = True
 
         # 3d. ChoCH as continuation fallback
-        if not has_continuation:
-            if self.check_choch(candles_5m, direction):
-                confirmations.append("CHOCH_CONTINUATION")
-                has_continuation = True
+        if not has_continuation and self.check_choch(candles_5m, direction):
+            confirmations.append("CHOCH_CONTINUATION")
+            has_continuation = True
 
         if not has_continuation:
             self._last_rejection_reasons.append("Opt5: No continuation signal (need EQ/FVG/SMT/ChoCH)")
@@ -2273,8 +2263,6 @@ class FlexibleICTStrategy:
         confirmations.append("MICRO_BOS")
 
         # ====== STEP 5: ENTRY ======
-        entry_price = current_price
-
         # ====== STEP 6: DOL-BASED TP ======
         dol_tp = self.find_draws_on_liquidity(candles_5m, candles_1h, direction, symbol)
 
@@ -2691,11 +2679,11 @@ class FlexibleICTStrategy:
         htf_trend_1h = self.determine_htf_trend(candles, 60)
         if htf_trend_4h == TrendDirection.RANGING or htf_trend_4h is None:
             self._last_rejection_reasons.append(
-                f"Opt6: 4H ranging/unclear — need both 4H+1H aligned")
+                "Opt6: 4H ranging/unclear — need both 4H+1H aligned")
             return None
         if htf_trend_1h == TrendDirection.RANGING or htf_trend_1h is None:
             self._last_rejection_reasons.append(
-                f"Opt6: 1H ranging/unclear — need both 4H+1H aligned")
+                "Opt6: 1H ranging/unclear — need both 4H+1H aligned")
             return None
         if htf_trend_4h != htf_trend_1h:
             self._last_rejection_reasons.append(
@@ -2789,8 +2777,6 @@ class FlexibleICTStrategy:
             self._last_rejection_reasons.append("Opt7: Insufficient HTF data for Breaker Block scan")
             return None
 
-        pip_value = self.get_pip_value(symbol)
-        point_value = self.get_point_value(symbol)
         current_price = candles[-1]['close']
 
         # ====== STEP 2: Scan for broken zones ======
@@ -2886,15 +2872,10 @@ class FlexibleICTStrategy:
 
         for bz in breaker_zones:
             # Price must currently be within or near the old zone boundary
-            # Short setup: current price is back in the old demand zone range
-            if bz['direction'] == 'short':
-                # Price should be at or near the zone from below (retesting as resistance)
-                if (bz['zone_low'] - zone_buffer) <= current_price <= (bz['zone_high'] + zone_buffer):
-                    valid_retest_zones.append(bz)
-            else:  # Long setup
-                # Price should be at or near the zone from above (retesting as support)
-                if (bz['zone_low'] - zone_buffer) <= current_price <= (bz['zone_high'] + zone_buffer):
-                    valid_retest_zones.append(bz)
+            # Both short (retesting as resistance) and long (retesting as support)
+            # use the same zone proximity check
+            if (bz['zone_low'] - zone_buffer) <= current_price <= (bz['zone_high'] + zone_buffer):
+                valid_retest_zones.append(bz)
 
         if not valid_retest_zones:
             self._last_rejection_reasons.append(
@@ -2937,7 +2918,7 @@ class FlexibleICTStrategy:
 
         if htf_trend_4h == TrendDirection.RANGING or htf_trend_1h == TrendDirection.RANGING:
             self._last_rejection_reasons.append(
-                f"Opt7: HTF ranging — need aligned 4H+1H for Breaker Block")
+                "Opt7: HTF ranging — need aligned 4H+1H for Breaker Block")
             return None
         if htf_trend_4h != htf_trend_1h:
             self._last_rejection_reasons.append(
@@ -3188,7 +3169,7 @@ class FlexibleICTStrategy:
             '_zone_sl_level': matched_zone.low if direction == 'long' else matched_zone.high,
         }
 
-    def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> float:
+    def find_sweep_level(self, candles: List[dict], direction: str, setup_type: str = None) -> Optional[float]:
         """
         Find the NEAREST swing pivot for SL placement.
         
@@ -3260,8 +3241,6 @@ class FlexibleICTStrategy:
         is_long = direction == 'long'
         setup_type = setup_data['setup_type'].value if hasattr(setup_data['setup_type'], 'value') else str(setup_data['setup_type'])
         
-        is_us30 = self._is_us30(symbol)
-
         # ICT SL Placement: Beyond the liquidity sweep level
         # This is the swing high/low that was swept before entry
         # Pass setup_type to use tighter structure for HTF_LIQUIDITY_BOS
@@ -3318,25 +3297,13 @@ class FlexibleICTStrategy:
         # Max SL limits - different for Gold vs Forex
         # Gold SL widened 2026-02-25: $10-15 min was too tight for $5200 gold,
         # normal intraday ATR is $25-40. Bot kept getting stopped out by noise.
-        is_us30 = self._is_us30(symbol)
-        if is_us30:
+        if self._is_us30(symbol):
             # US30: SL in index points (40-120 typical range)
-            # point_value = 0.1, so 40 points = 400 point_value units
             # Widened 2026-03-15: backtest showed 6/7 losses hit exactly -80pt cap,
             # direction was correct but SL too tight — price swept through then reversed.
-            atr_multiplier = 2.0  # US30 needs 2x ATR for SL
-            # min_sl raised from 40pts (400) → 80pts (800) on 2026-03-15
-            # Backtest showed 2/3 losses were SL-noise hits at the 40pt floor.
-            # US30 typically moves 30-50pts in random noise at the open — need 80pt buffer.
-            if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 1200  # 120 points max
-                min_sl_points = 800   # 80 points min (was 400/40pts — too tight, noise hits)
-            elif setup_type == 'BREAKER_BLOCK':
-                max_sl_points = 1200  # 120 points max
-                min_sl_points = 800   # 80 points min
-            else:
-                max_sl_points = 1200  # 120 points max
-                min_sl_points = 800   # 80 points min
+            # All setup types use the same US30 SL limits (80-120 pts)
+            max_sl_points = 1200  # 120 points max
+            min_sl_points = 800   # 80 points min (was 400/40pts — too tight, noise hits)
         elif is_gold:
             if setup_type == 'HTF_LIQUIDITY_BOS':
                 max_sl_points = 3000   # $30 max for HTF_LIQUIDITY_BOS (was $20)
@@ -3346,19 +3313,13 @@ class FlexibleICTStrategy:
                 min_sl_points = 2500   # $25 min (was $15)
         else:
             # Forex: Tighter SL = better R:R, pivot-based placement is precise
-            if setup_type == 'HTF_LIQUIDITY_BOS':
-                max_sl_points = 120  # 12 pips max for HTF_LIQUIDITY_BOS
-                min_sl_points = 70   # 7 pips min (was 50/5p — too tight, noise stops)
-            elif setup_type in ('LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
+            if setup_type in ('HTF_LIQUIDITY_BOS', 'LIQ_SWEEP_ENGULF', 'ICT_SWEEP_CONFIRM'):
                 # Tightened 2026-04-04: trades hitting 15-pip cap always lose
                 # 12-pip max forces higher quality setups only
-                max_sl_points = 120  # 12 pips max (was 150/15p — cap hits = weak setups)
-                min_sl_points = 70   # 7 pips min
-            elif setup_type == 'ZONE_OB_FIB_SWEEP':
-                max_sl_points = 170  # 17 pips max for Option 6
+                max_sl_points = 120  # 12 pips max
                 min_sl_points = 70   # 7 pips min
             else:
-                max_sl_points = 170  # 17 pips max for OB_FVG_FIB, HTF_ZONE_OB_CHOCH
+                max_sl_points = 170  # 17 pips max for ZONE_OB_FIB_SWEEP, OB_FVG_FIB, etc.
                 min_sl_points = 70   # 7 pips min
         
         # Use the LARGER of static minimum or ATR-based minimum
@@ -3384,7 +3345,6 @@ class FlexibleICTStrategy:
             else:
                 stop_loss = entry + max_sl_distance
             sl_distance = max_sl_distance
-            sl_points = max_sl_points
         
         # ================================================================
         # DYNAMIC TP: DOL-based targeting for ALL options
@@ -3778,7 +3738,7 @@ class FlexibleICTStrategy:
                 return None
             if symbol not in htf_bos_allowed_symbols:
                 self._last_rejection_reasons.append(
-                    f"HTF_LIQUIDITY_BOS restricted to EUR_USD (GBP 25% WR)")
+                    "HTF_LIQUIDITY_BOS restricted to EUR_USD (GBP 25% WR)")
                 _log.info(f"🚫 [{symbol}] Rejected: HTF_LIQUIDITY_BOS non-EUR pair")
                 return None
         
@@ -3819,11 +3779,7 @@ class FlexibleICTStrategy:
         elif not self.check_5m_entry_trigger(base_candles, direction):
             _log.info(f"ℹ️ [{symbol}] Skipping ChoCH gate: {'engulfing trigger' if is_engulfing_setup else f'{confirmation_count} confirmations'}")
         
-        # 4. Session-specific confidence threshold
-        session = self.get_session_type(current_timestamp)
-        min_confidence = self.session_settings.get(session, {}).get('min_confidence', 0.85)
-        
-        # Check confirmation count (tightened 2026-03-07)
+        # 4. Confirmation count threshold (tightened 2026-03-07)
         confirmation_count = len(setup_data['confirmations'])
         is_gold = symbol in ['XAUUSD', 'XAU_USD', 'GOLD']
         direction = setup_data['direction']

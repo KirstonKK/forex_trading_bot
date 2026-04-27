@@ -19,16 +19,176 @@ from collections import Counter, defaultdict
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
+# Load API keys from forex-bot.env (project root)
+_env_file = os.path.join(project_root, 'forex-bot.env')
+if os.path.exists(_env_file):
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith('#') and '=' in _line:
+                _k, _v = _line.split('=', 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 
-def download_mtf_data(yf_symbol: str, start: str, end: str) -> Dict[str, List[dict]]:
-    """Download multi-timeframe candles from yfinance."""
+# Twelve Data symbol map (internal → API format)
+_TD_SYMBOL_MAP = {
+    'EUR_USD': 'EUR/USD',
+    'GBP_USD': 'GBP/USD',
+    'EURUSD':  'EUR/USD',
+    'GBPUSD':  'GBP/USD',
+}
+
+# yfinance fallback symbol map
+_YF_SYMBOL_MAP = {
+    'EUR_USD': '6E=F',
+    'GBP_USD': '6B=F',
+}
+
+
+def _build_4h_from_1h(candles_1h: List[dict]) -> List[dict]:
+    """Aggregate 1H candles into 4H candles."""
+    candles_4h = []
+    buf = []
+    for c in candles_1h:
+        buf.append(c)
+        if len(buf) == 4:
+            candles_4h.append({
+                'timestamp': buf[0]['timestamp'],
+                'time':      buf[0]['time'],
+                'open':      buf[0]['open'],
+                'high':      max(b['high'] for b in buf),
+                'low':       min(b['low'] for b in buf),
+                'close':     buf[-1]['close'],
+                'volume':    sum(b['volume'] for b in buf),
+            })
+            buf = []
+    return candles_4h
+
+
+import time as _time
+import requests as _req
+
+# Global rate limiter: track all Twelve Data call timestamps
+_TD_CALL_TIMES: List[float] = []
+_TD_MINUTE_LIMIT = 7  # Stay safely under the 8/min free tier limit
+
+
+def _td_wait():
+    """Block until the per-minute rate limit allows another API call, then record it."""
+    while True:
+        now = _time.time()
+        _TD_CALL_TIMES[:] = [t for t in _TD_CALL_TIMES if now - t < 60]
+        if len(_TD_CALL_TIMES) < _TD_MINUTE_LIMIT:
+            break
+        oldest = min(_TD_CALL_TIMES)
+        wait = 60 - (now - oldest) + 1.5
+        if wait > 0:
+            print(f"\n  [TD] Rate limit reached, waiting {wait:.0f}s...", end=" ", flush=True)
+            _time.sleep(wait)
+    _TD_CALL_TIMES.append(_time.time())
+
+
+def _fetch_td_range(td_symbol: str, interval_td: str, start: str, end: str, api_key: str) -> List[dict]:
+    """Fetch OHLCV candles from Twelve Data for a date range, paginating if needed."""
+    BASE_URL = "https://api.twelvedata.com/time_series"
+    INTERVAL_MINS = {'5min': 5, '15min': 15, '1h': 60, '4h': 240}
+
+    all_candles: List[dict] = []
+    current_end = end
+    start_ts = int(datetime.strptime(start, '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+    interval_min = INTERVAL_MINS.get(interval_td, 5)
+
+    for _iteration in range(10):  # Max 10 paginated requests (covers 5M over 170 days)
+        params = {
+            'symbol':     td_symbol,
+            'interval':   interval_td,
+            'outputsize': 5000,
+            'start_date': start,
+            'end_date':   current_end,
+            'apikey':     api_key,
+        }
+        _td_wait()  # Enforce global rate limit before every call
+        try:
+            resp = _req.get(BASE_URL, params=params, timeout=30)
+            data = resp.json()
+        except Exception as e:
+            print(f"  [TD] Request error: {e}")
+            break
+
+        if data.get('status') == 'error':
+            print(f"  [TD] API error: {data.get('message', 'unknown')}")
+            break
+
+        values = data.get('values', [])
+        if not values:
+            break
+
+        # Twelve Data returns newest-first; parse all into candle dicts
+        for v in values:
+            try:
+                dt = datetime.strptime(v['datetime'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                all_candles.append({
+                    'timestamp': int(dt.timestamp()),
+                    'time':      v['datetime'][:16],
+                    'open':      float(v['open']),
+                    'high':      float(v['high']),
+                    'low':       float(v['low']),
+                    'close':     float(v['close']),
+                    'volume':    int(v.get('volume', 0) or 0),
+                })
+            except (ValueError, KeyError):
+                continue
+
+        if len(values) < 5000:
+            break  # Received all data in range
+
+        # Paginate backward: oldest candle is the last element (newest-first list)
+        oldest_dt = datetime.strptime(values[-1]['datetime'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+        if int(oldest_dt.timestamp()) <= start_ts:
+            break  # Covered the full requested range
+
+        prev_end = oldest_dt - timedelta(minutes=interval_min)
+        current_end = prev_end.strftime('%Y-%m-%d %H:%M:%S')
+
+    all_candles.sort(key=lambda c: c['timestamp'])
+    # Deduplicate by timestamp (pagination overlap)
+    seen: set = set()
+    unique = []
+    for c in all_candles:
+        if c['timestamp'] not in seen:
+            seen.add(c['timestamp'])
+            unique.append(c)
+    return unique
+
+
+def _download_mtf_twelvedata(symbol: str, start: str, end: str, api_key: str) -> Dict[str, List[dict]]:
+    """Download multi-timeframe data from Twelve Data (spot forex prices)."""
+    td_symbol = _TD_SYMBOL_MAP.get(symbol, symbol)
+    mtf: Dict[str, List[dict]] = {}
+    intervals = {'5M': '5min', '15M': '15min', '1H': '1h'}
+
+    for tf, td_interval in intervals.items():
+        print(f"  {tf} ({td_interval}, Twelve Data)...", end=" ", flush=True)
+        candles = _fetch_td_range(td_symbol, td_interval, start, end, api_key)
+        mtf[tf] = candles
+        print(f"OK {len(candles)} candles")
+
+    if mtf.get('1H'):
+        mtf['4H'] = _build_4h_from_1h(mtf['1H'])
+        print(f"  4H built: {len(mtf['4H'])} candles")
+
+    return mtf
+
+
+def _download_mtf_yfinance(symbol: str, start: str, end: str) -> Dict[str, List[dict]]:
+    """Download multi-timeframe data from yfinance (fallback)."""
     import yfinance as yf
 
-    mtf = {}
+    yf_symbol = _YF_SYMBOL_MAP.get(symbol, symbol)
+    mtf: Dict[str, List[dict]] = {}
     intervals = {'5M': '5m', '15M': '15m', '1H': '1h'}
 
     for tf, yf_interval in intervals.items():
-        print(f"  {tf} ({yf_interval})...", end=" ", flush=True)
+        print(f"  {tf} ({yf_interval}, yfinance fallback)...", end=" ", flush=True)
         try:
             data = yf.download(yf_symbol, start=start, end=end,
                                interval=yf_interval, progress=False)
@@ -38,10 +198,10 @@ def download_mtf_data(yf_symbol: str, start: str, end: str) -> Dict[str, List[di
                     candles.append({
                         'timestamp': int(ts.timestamp()),
                         'time': ts.strftime('%Y-%m-%d %H:%M'),
-                        'open': float(row['Open'].iloc[0]) if hasattr(row['Open'], 'iloc') else float(row['Open']),
-                        'high': float(row['High'].iloc[0]) if hasattr(row['High'], 'iloc') else float(row['High']),
-                        'low': float(row['Low'].iloc[0]) if hasattr(row['Low'], 'iloc') else float(row['Low']),
-                        'close': float(row['Close'].iloc[0]) if hasattr(row['Close'], 'iloc') else float(row['Close']),
+                        'open':  float(row['Open'].iloc[0])   if hasattr(row['Open'],   'iloc') else float(row['Open']),
+                        'high':  float(row['High'].iloc[0])   if hasattr(row['High'],   'iloc') else float(row['High']),
+                        'low':   float(row['Low'].iloc[0])    if hasattr(row['Low'],    'iloc') else float(row['Low']),
+                        'close': float(row['Close'].iloc[0])  if hasattr(row['Close'],  'iloc') else float(row['Close']),
                         'volume': float(row['Volume'].iloc[0]) if hasattr(row['Volume'], 'iloc') else float(row.get('Volume', 0)),
                     })
                 except Exception:
@@ -53,27 +213,20 @@ def download_mtf_data(yf_symbol: str, start: str, end: str) -> Dict[str, List[di
             print(f"FAIL {e}")
             mtf[tf] = []
 
-    # Build 4H from 1H
     if mtf.get('1H'):
-        candles_4h = []
-        buf = []
-        for c in mtf['1H']:
-            buf.append(c)
-            if len(buf) == 4:
-                candles_4h.append({
-                    'timestamp': buf[0]['timestamp'],
-                    'time': buf[0]['time'],
-                    'open': buf[0]['open'],
-                    'high': max(b['high'] for b in buf),
-                    'low': min(b['low'] for b in buf),
-                    'close': buf[-1]['close'],
-                    'volume': sum(b['volume'] for b in buf),
-                })
-                buf = []
-        mtf['4H'] = candles_4h
-        print(f"  4H built: {len(candles_4h)} candles")
+        mtf['4H'] = _build_4h_from_1h(mtf['1H'])
+        print(f"  4H built: {len(mtf['4H'])} candles")
 
     return mtf
+
+
+def download_mtf_data(symbol: str, start: str, end: str) -> Dict[str, List[dict]]:
+    """Download multi-timeframe candles. Uses Twelve Data if key is available, else yfinance."""
+    api_key = os.environ.get("TWELVE_DATA_API_KEY", "")
+    if api_key:
+        return _download_mtf_twelvedata(symbol, start, end, api_key)
+    print(f"  [!] No TWELVE_DATA_API_KEY — falling back to yfinance futures")
+    return _download_mtf_yfinance(symbol, start, end)
 
 
 def simulate_trade(signal: dict, candles_5m: List[dict], start_idx: int,
@@ -111,32 +264,28 @@ def run_backtest():
     import logging
     logging.basicConfig(level=logging.WARNING)
 
-    # Date range: maximum available 5M data (yfinance ~60 day limit)
+    # Date range: 58 days back (Twelve Data handles full history; yfinance ~60 day limit)
     today = datetime.now(timezone.utc)
     lookback_start = (today - timedelta(days=58)).strftime('%Y-%m-%d')
     end_date = (today + timedelta(days=1)).strftime('%Y-%m-%d')
     start_dt = today - timedelta(days=55)  # Leave room for HTF context
     end_dt = today + timedelta(days=1)
 
-    yf_map = {
-        'EUR_USD': '6E=F',
-        'GBP_USD': '6B=F',
-    }
-
     symbols = ['EUR_USD', 'GBP_USD']
 
+    data_source = "Twelve Data" if os.environ.get("TWELVE_DATA_API_KEY") else "yfinance (fallback)"
     print("=" * 70)
     print("  COMPREHENSIVE BACKTEST")
     print(f"  Period: {start_dt.strftime('%Y-%m-%d')} to {end_dt.strftime('%Y-%m-%d')}")
     print(f"  Symbols: {', '.join(symbols)}")
+    print(f"  Data source: {data_source}")
     print("=" * 70)
 
     # Download data
     all_mtf = {}
     for symbol in symbols:
-        yf_ticker = yf_map[symbol]
-        print(f"\nDownloading {symbol} ({yf_ticker})...")
-        all_mtf[symbol] = download_mtf_data(yf_ticker, lookback_start, end_date)
+        print(f"\nDownloading {symbol}...")
+        all_mtf[symbol] = download_mtf_data(symbol, lookback_start, end_date)
 
     # Run strategy
     strategy = FlexibleICTStrategy()

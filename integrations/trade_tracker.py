@@ -3,10 +3,12 @@ Trade Performance Tracker
 Monitors actual signal performance and calculates real win rates.
 Automatically resolves signals when price hits TP or SL.
 
-CRITICAL: All trade resolutions are VERIFIED against real yfinance price
-history. We never trust a single candle — we fetch the full history from
-signal detection time to now and walk through candles chronologically to
+CRITICAL: All trade resolutions are VERIFIED against real price history.
+We never trust a single candle — we fetch the full history from signal
+detection time to now and walk through candles chronologically to
 determine what was hit first.
+
+Verification priority: Twelve Data (proper OHLCV) → yfinance (fallback).
 """
 
 import json
@@ -72,6 +74,91 @@ def _get_yfinance():
     return _yf
 
 
+# Twelve Data connector for verification (preferred over yfinance)
+_twelve_data = None
+
+def _get_twelve_data():
+    """Lazy-load TwelveDataConnector for verification."""
+    global _twelve_data
+    if _twelve_data is None:
+        try:
+            from connectors.twelve_data import TwelveDataConnector
+            _twelve_data = TwelveDataConnector()
+            if not _twelve_data.available:
+                logger.warning("Twelve Data API key not set — will use yfinance for verification")
+                _twelve_data = False  # Sentinel: tried but unavailable
+        except ImportError:
+            logger.warning("twelve_data connector not importable — will use yfinance for verification")
+            _twelve_data = False
+    return _twelve_data if _twelve_data is not False else None
+
+
+def _fetch_twelve_data_history(symbol: str, start_time: datetime, end_time: datetime = None,
+                               interval: str = '5m') -> Optional[Any]:
+    """
+    Fetch price history from Twelve Data, returning a DataFrame-like structure.
+    Returns a pandas DataFrame with Open/High/Low/Close columns, or None.
+    """
+    td = _get_twelve_data()
+    if td is None:
+        return None
+    
+    if end_time is None:
+        end_time = datetime.now(timezone.utc)
+    
+    # Ensure timezone-aware
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    if end_time.tzinfo is None:
+        end_time = end_time.replace(tzinfo=timezone.utc)
+    
+    # Calculate how many candles we need
+    interval_minutes = {'5m': 5, '15m': 15, '1h': 60, '4h': 240}.get(interval, 5)
+    duration_minutes = (end_time - start_time).total_seconds() / 60
+    outputsize = min(int(duration_minutes / interval_minutes) + 20, 500)  # Add buffer, cap at 500
+    outputsize = max(outputsize, 30)  # Minimum 30 candles
+    
+    try:
+        candles = td.fetch_candles(symbol, interval=interval, outputsize=outputsize)
+        if not candles:
+            return None
+        
+        # Convert to pandas DataFrame matching yfinance format
+        import pandas as pd
+        rows = []
+        for c in candles:
+            ts = datetime.fromtimestamp(c['time'], tz=timezone.utc)
+            rows.append({
+                'Open': c['open'],
+                'High': c['high'],
+                'Low': c['low'],
+                'Close': c['close'],
+                'Volume': c.get('volume', 0),
+                '_time': ts,
+            })
+        
+        if not rows:
+            return None
+        
+        df = pd.DataFrame(rows)
+        df.index = pd.DatetimeIndex(df['_time'])
+        df = df.drop(columns=['_time'])
+        
+        # Filter to only candles AFTER signal entry time
+        df = df[df.index >= start_time]
+        
+        if df.empty:
+            logger.warning(f"No Twelve Data candles after signal time {start_time} for {symbol}")
+            return None
+        
+        logger.info(f"📈 Twelve Data: {len(df)} candles for {symbol} ({start_time.strftime('%H:%M')} → {end_time.strftime('%H:%M')} UTC)")
+        return df
+        
+    except Exception as e:
+        logger.error(f"Twelve Data verification fetch failed for {symbol}: {e}")
+        return None
+
+
 def _calculate_pips(price_diff: float, symbol: str) -> float:
     """
     Calculate pips from a price difference.
@@ -89,10 +176,17 @@ def _calculate_pips(price_diff: float, symbol: str) -> float:
 def fetch_price_history(symbol: str, start_time: datetime, end_time: datetime = None,
                         interval: str = '5m') -> Optional[Any]:
     """
-    Fetch real price candles from yfinance between start_time and end_time.
+    Fetch real price candles between start_time and end_time.
+    Tries Twelve Data first (proper OHLCV), falls back to yfinance.
     
     Returns a DataFrame with columns: Open, High, Low, Close (or None on failure).
     """
+    # Try Twelve Data first — returns proper OHLCV candles
+    df = _fetch_twelve_data_history(symbol, start_time, end_time, interval)
+    if df is not None and len(df) > 0:
+        return df
+    
+    # Fallback to yfinance
     yf = _get_yfinance()
     if yf is None:
         return None
@@ -704,11 +798,11 @@ class TradeTracker:
                     resolved.append({**asdict(trade), 'verified': True})
                     
                 elif quick_hit and verification is None:
-                    # Quick check said hit, but yfinance returned no data
+                    # Quick check said hit, but price history returned no data
                     # DON'T resolve — we can't verify it
                     logger.warning(
                         f"⚠️ Quick check found {'TP' if hit_tp else 'SL'} hit for {signal_id} "
-                        f"but yfinance verification returned no data — NOT resolving (will retry)"
+                        f"but price verification returned no data — NOT resolving (will retry)"
                     )
                 # else: verification returned None (no hit found in history) — trade stays active
         

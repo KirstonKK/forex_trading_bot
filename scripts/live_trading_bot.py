@@ -152,7 +152,6 @@ class LiveTradingBot:
                 return False
             
             # Validate trade with risk manager
-            current_balance = self.mt5.get_account_balance()
             trade_checks = self.risk_manager.can_open_trade()
             if not all(trade_checks.values()):
                 logger.warning(f"Risk gate blocked trade for {symbol}: {trade_checks}")

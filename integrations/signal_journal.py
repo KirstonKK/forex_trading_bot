@@ -64,9 +64,9 @@ class SignalJournal:
         Returns dict with outcome info, or None if can't determine yet.
         """
         try:
-            import yfinance as yf
+            from integrations.trade_tracker import fetch_price_history
         except ImportError:
-            logger.error("yfinance not installed")
+            logger.error("trade_tracker not importable — cannot verify signal")
             return None
 
         symbol = signal['symbol']
@@ -98,22 +98,8 @@ class SignalJournal:
 
         # Fetch 5M candles from signal time to now (max 48h window)
         end_dt = min(now, sig_dt + timedelta(hours=48))
-        ticker = TICKER_MAP.get(symbol)
-        if not ticker:
-            logger.warning(f"No ticker mapping for {symbol}")
-            return None
 
-        try:
-            data = yf.download(
-                ticker, 
-                start=sig_dt.strftime('%Y-%m-%d'),
-                end=(end_dt + timedelta(days=1)).strftime('%Y-%m-%d'),
-                interval='5m',
-                progress=False
-            )
-        except Exception as e:
-            logger.error(f"yfinance download failed for {symbol}: {e}")
-            return None
+        data = fetch_price_history(symbol, sig_dt, end_dt, interval='5m')
 
         if data is None or data.empty:
             logger.warning(f"No price data for {symbol} after {sig_dt}")

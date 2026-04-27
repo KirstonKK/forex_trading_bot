@@ -1,8 +1,8 @@
 """
 Live Data Poller - Multi-Source OHLCV Data
 Sources (tried in order):
-1. yfinance (free, no API key)
-2. Twelve Data (free tier, 800/day — requires TWELVE_DATA_API_KEY)
+1. Twelve Data (free tier, 800/day — requires TWELVE_DATA_API_KEY)  [proper OHLCV]
+2. yfinance (free, no API key) [fallback — returns flat O=H=L=C on 5M/15M]
 """
 
 import sys
@@ -48,39 +48,39 @@ HEALTH_URL = "http://localhost:5000/health"
 DATA_URL = "http://localhost:5000/data"
 
 # Currency pairs to track (XAU_USD removed 2026-03-12: 17.6% WR, -1755 pips)
-# US30 added 2026-03-17: 66.7% WR, PF 5.08 in 60-day backtest (NYSE open only 13-15 UTC)
-PAIRS = ['EURUSD', 'GBPUSD', 'US30']
+# US30 removed 2026-03-25: never fired a signal in production (always "ranging/unclear")
+PAIRS = ['EURUSD', 'GBPUSD']
 
 # Data freshness threshold (seconds)
 STALE_DATA_THRESHOLD = 300  # 5 minutes
 
-# Initialize Twelve Data connector (fallback when yfinance fails)
+# Initialize Twelve Data connector (PRIMARY source — proper OHLCV data)
 twelve_data = TwelveDataConnector()
 if twelve_data.available:
-    logger.info("✓ Twelve Data connector ready (fallback data source)")
+    logger.info("✓ Twelve Data connector ready (PRIMARY data source)")
 else:
-    logger.warning("⚠ Twelve Data API key not set — only yfinance available")
-    logger.warning("  Set TWELVE_DATA_API_KEY in forex-bot.env for fallback data")
+    logger.warning("⚠ Twelve Data API key not set — using yfinance only (degraded OHLCV)")
+    logger.warning("  Set TWELVE_DATA_API_KEY in forex-bot.env for proper candle data")
 
 # Track which source is working for each symbol
-# 'yfinance' or 'twelvedata'
+# 'twelvedata' (preferred) or 'yfinance' (fallback)
 _symbol_source: dict = {}
-# Track consecutive yfinance failures per symbol
-_yf_fail_count: dict = {}
+# Track consecutive Twelve Data failures per symbol
+_td_fail_count: dict = {}
 
 # Polling intervals (seconds) per data source
-# yfinance: aggressive — unlimited API, catch candle closes quickly
-# Twelve Data: conservative — 800 calls/day budget
-#   3 pairs × (132 + 88 + 22 + 6) = 3 × 248 = 744 calls/day ≈ headroom
+# Twelve Data (primary): balanced for 800/day budget
+#   2 pairs × (96 + 40 + 16 + 4) = 2 × 156 = 312 calls/day (well within 800)
+# yfinance (fallback): aggressive — unlimited API but degraded OHLCV quality
 _POLL_INTERVALS = {
+    'twelvedata': {'5m': 300,  '15m': 900,  '1h': 3600, '4h': 14400},
     'yfinance':   {'5m': 30,   '15m': 120,  '1h': 300,  '4h': 1200},
-    'twelvedata': {'5m': 600,  '15m': 900,  '1h': 3600, '4h': 14400},
 }
 
 def _poll_interval(pair, timeframe):
     """Get polling interval in seconds based on active data source."""
-    source = _symbol_source.get(pair, 'yfinance')
-    return _POLL_INTERVALS.get(source, _POLL_INTERVALS['yfinance'])[timeframe]
+    source = _symbol_source.get(pair, 'twelvedata' if twelve_data.available else 'yfinance')
+    return _POLL_INTERVALS.get(source, _POLL_INTERVALS['twelvedata'])[timeframe]
 
 
 def is_forex_market_open():
@@ -231,38 +231,41 @@ def _fetch_twelvedata(symbol, interval='5m', period='1d'):
 
 def fetch_real_historical_data(symbol, interval='5m', period='1d'):
     """
-    Fetch OHLCV candle data, trying yfinance first then Twelve Data.
+    Fetch OHLCV candle data, trying Twelve Data first then yfinance.
+    
+    Twelve Data is preferred because it returns proper OHLCV candles.
+    yfinance returns flat O=H=L=C on 5M/15M which breaks pattern detection.
     
     Auto-tracks which source works per symbol and skips broken sources
     to avoid wasting time on repeated failures.
     """
-    global _symbol_source, _yf_fail_count
+    global _symbol_source, _td_fail_count
     
     source = _symbol_source.get(symbol)
-    yf_fails = _yf_fail_count.get(symbol, 0)
+    td_fails = _td_fail_count.get(symbol, 0)
     
-    # If yfinance has failed 3+ times for this symbol, skip it
-    try_yfinance = (source != 'twelvedata') and (yf_fails < 3)
+    # Try Twelve Data first (proper OHLCV data)
+    try_twelvedata = twelve_data.available and (source != 'yfinance') and (td_fails < 3)
     
-    if try_yfinance:
-        candles = _fetch_yfinance(symbol, interval, period)
+    if try_twelvedata:
+        candles = _fetch_twelvedata(symbol, interval, period)
         if candles:
-            if source != 'yfinance':
-                logger.info(f"  📡 {symbol}: using yfinance")
-                _symbol_source[symbol] = 'yfinance'
-            _yf_fail_count[symbol] = 0
+            if source != 'twelvedata':
+                logger.info(f"  📡 {symbol}: using Twelve Data (proper OHLCV)")
+                _symbol_source[symbol] = 'twelvedata'
+            _td_fail_count[symbol] = 0
             return candles
         else:
-            _yf_fail_count[symbol] = yf_fails + 1
-            if _yf_fail_count[symbol] >= 3:
-                logger.warning(f"  ⚠ {symbol}: yfinance failed 3x, switching to Twelve Data")
+            _td_fail_count[symbol] = td_fails + 1
+            if _td_fail_count[symbol] >= 3:
+                logger.warning(f"  ⚠ {symbol}: Twelve Data failed 3x, switching to yfinance")
     
-    # Fallback to Twelve Data
-    candles = _fetch_twelvedata(symbol, interval, period)
+    # Fallback to yfinance (degraded OHLCV but unlimited)
+    candles = _fetch_yfinance(symbol, interval, period)
     if candles:
-        if source != 'twelvedata':
-            logger.info(f"  📡 {symbol}: using Twelve Data (yfinance unavailable)")
-            _symbol_source[symbol] = 'twelvedata'
+        if source != 'yfinance':
+            logger.info(f"  📡 {symbol}: using yfinance (Twelve Data unavailable)")
+            _symbol_source[symbol] = 'yfinance'
         return candles
     
     # Both sources failed
@@ -339,7 +342,7 @@ def initial_data_load():
 
 
 def poll_live_data():
-    """Poll for real OHLCV candles across ALL timeframes from yfinance."""
+    """Poll for real OHLCV candles across ALL timeframes (Twelve Data primary, yfinance fallback)."""
     logger.info("Starting live polling with REAL CANDLE DATA on all timeframes...")
     
     last_5m_update = {}
@@ -496,15 +499,16 @@ if __name__ == '__main__':
     print("\n" + "="*70)
     print("LIVE FOREX DATA POLLER - MULTI-SOURCE")
     print("="*70)
-    print("Source 1: yfinance (free, no API key)")
-    print("Source 2: Twelve Data (free tier, 800/day)")
+    print("Source 1: Twelve Data (free tier, 800/day — proper OHLCV)")
+    print("Source 2: yfinance (free, fallback — degraded OHLCV)")
     print(f"Webhook URL: {WEBHOOK_URL}")
     print(f"Tracking: {', '.join(PAIRS)}")
     
     if twelve_data.available:
-        print(f"Twelve Data: ✓ API key set ({twelve_data.daily_calls_remaining} calls remaining)")
+        print(f"Twelve Data: ✓ PRIMARY ({twelve_data.daily_calls_remaining} calls remaining)")
     else:
-        print("Twelve Data: ✗ No API key (set TWELVE_DATA_API_KEY in forex-bot.env)")
+        print("Twelve Data: ✗ No API key — using yfinance ONLY (degraded candle data!)")
+        print("  ⚠ Set TWELVE_DATA_API_KEY in forex-bot.env for proper OHLCV candles")
     
     # Show market status
     is_open, next_open, message = is_forex_market_open()

@@ -35,7 +35,13 @@ class TwelveDataConnector:
         'AUDUSD': 'AUD/USD',
         'XAUUSD': 'XAU/USD',
         'US30':   'DJI',       # Dow Jones Industrial Average
-        'US_30':  'DJI',
+        # Underscore variants (used by trade_tracker, signal_journal, etc.)
+        'EUR_USD': 'EUR/USD',
+        'GBP_USD': 'GBP/USD',
+        'USD_JPY': 'USD/JPY',
+        'AUD_USD': 'AUD/USD',
+        'XAU_USD': 'XAU/USD',
+        'US_30':   'DJI',
     }
     
     # Map internal timeframes to Twelve Data intervals

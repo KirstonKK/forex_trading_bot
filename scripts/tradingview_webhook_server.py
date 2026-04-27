@@ -18,6 +18,9 @@ from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime, timezone
 import logging
 import json
+
+# Constant for ISO 8601 UTC timezone suffix replacement
+_UTC_OFFSET = '+00:00'
 import requests
 from typing import Dict, List
 import time
@@ -327,7 +330,7 @@ def _extract_hour(signal: dict) -> int:
         if isinstance(ts, (int, float)):
             return datetime.fromtimestamp(ts, tz=timezone.utc).hour
         if isinstance(ts, str) and ts:
-            return datetime.fromisoformat(ts.replace('Z', '+00:00')).hour
+            return datetime.fromisoformat(ts.replace('Z', _UTC_OFFSET)).hour
     except Exception:
         pass
     return -1
@@ -447,7 +450,7 @@ def prune_old_signals():
         try:
             sig_time = sig.get('detected_at') or sig.get('timestamp')
             if isinstance(sig_time, str):
-                sig_dt = datetime.fromisoformat(sig_time.replace('Z', '+00:00'))
+                sig_dt = datetime.fromisoformat(sig_time.replace('Z', _UTC_OFFSET))
             elif isinstance(sig_time, (int, float)):
                 sig_dt = datetime.fromtimestamp(sig_time, tz=timezone.utc)
             else:
@@ -567,7 +570,7 @@ def _on_background_trade_resolved(trade: dict):
 
 # Sync RECENT pending signals into TradeTracker for TP/SL monitoring.
 # Only sync signals < 4 hours old. The verifier will fetch real price
-# history from yfinance and immediately resolve any that already hit SL/TP.
+# history from Twelve Data (primary) and immediately resolve any that already hit SL/TP.
 # Signals older than 4h are too stale — expire them instead.
 if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
     tracker = get_trade_tracker(on_resolve_callback=_on_background_trade_resolved)
@@ -585,7 +588,7 @@ if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
         detected = sig.get('detected_at', '')
         try:
             if isinstance(detected, str) and detected:
-                sig_dt = datetime.fromisoformat(detected.replace('Z', '+00:00'))
+                sig_dt = datetime.fromisoformat(detected.replace('Z', _UTC_OFFSET))
                 if sig_dt.tzinfo is None:
                     sig_dt = sig_dt.replace(tzinfo=timezone.utc)
                 age_minutes = (now_ts - sig_dt).total_seconds() / 60
@@ -601,7 +604,7 @@ if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
         trade_id, resolution = tracker.add_trade(sig, sig.get('symbol', ''), signal_id=sig_id)
         
         if resolution:
-            # Trade was already resolved via yfinance verification
+            # Trade was already resolved via price history verification
             outcome = resolution['status']
             active_signals[sig_id]['status'] = outcome
             active_signals[sig_id]['exit_price'] = resolution.get('exit_price')
@@ -611,6 +614,45 @@ if TRADE_TRACKER_AVAILABLE and get_trade_tracker:
             if not resolution.get('entry_filled', True):
                 active_signals[sig_id]['entry_filled'] = False
             verified_resolved += 1
+            
+            # Send Telegram notification for startup-resolved signals
+            _sym = sig.get('symbol', '?')
+            _entry = sig.get('entry_price', sig.get('entry', 0))
+            _exit = resolution.get('exit_price', 0)
+            _pips = resolution.get('pips_result', 0)
+            _rr = resolution.get('rr_achieved', 0)
+            _dir = sig.get('direction', sig.get('type', '?'))
+            _setup = sig.get('setup_type', '?')
+            _candles = resolution.get('candles_checked', 0)
+            if outcome == 'win':
+                _emoji = "✅"
+                _msg = f"🎯 TP HIT — +{_pips:.1f} pips (RR {_rr:.1f})"
+            elif outcome == 'loss':
+                _emoji = "❌"
+                _msg = f"🛑 SL HIT — {_pips:.1f} pips"
+            elif outcome == 'expired':
+                _emoji = "⏰"
+                _msg = f"Entry {_entry:.5f} never reached — limit expired"
+            else:
+                _emoji = "ℹ️"
+                _msg = outcome
+            _tg = (
+                f"{_emoji} <b>TRADE {outcome.upper()}: {_sym}</b>\n"
+                f"Setup: {_setup} | {_dir.upper()}\n"
+                f"Entry: {_entry:.5f} → Exit: {_exit:.5f}\n"
+                f"{_msg}\n"
+                f"🔍 VERIFIED against {_candles} candles (resolved on startup)"
+            )
+            if telegram_notifier:
+                try:
+                    telegram_notifier.send_message(_tg)
+                except Exception:
+                    pass
+            if telegram_group_notifier:
+                try:
+                    telegram_group_notifier.send_message(_tg)
+                except Exception:
+                    pass
         else:
             synced += 1
     
@@ -830,8 +872,8 @@ def webhook():
         # ── AUTO-RESOLVE: Check if any pending signals hit TP or SL ──
         # The tracker now does TWO-LAYER verification:
         # 1. Quick check with incoming candle high/low
-        # 2. Full yfinance history walk when quick check finds a hit OR every ~30 min
-        # No trade is EVER resolved without yfinance verification.
+        # 2. Full Twelve Data/yfinance history walk when quick check finds a hit OR every ~30 min
+        # No trade is EVER resolved without price history verification.
         candle_high = float(data.get('high', 0))
         candle_low = float(data.get('low', 0))
         candle_close = float(data.get('close', 0))
@@ -869,9 +911,14 @@ def webhook():
                             f"Entry {trade.get('entry_price', 0):.5f} never reached\n"
                             f"Limit order was never filled — cancelling."
                         )
-                        if telegram_bot:
+                        if telegram_notifier:
                             try:
-                                telegram_bot.send_message(tg_text)
+                                telegram_notifier.send_message(tg_text)
+                            except Exception:
+                                pass
+                        if telegram_group_notifier:
+                            try:
+                                telegram_group_notifier.send_message(tg_text)
                             except Exception:
                                 pass
                         continue
@@ -893,7 +940,7 @@ def webhook():
                         # Reset consecutive loss counter on win
                         try:
                             strategy.record_win(symbol)
-                            logger.info(f"📝 Recorded win — consecutive loss counter reset")
+                            logger.info("📝 Recorded win — consecutive loss counter reset")
                         except Exception as e:
                             logger.warning(f"Could not record win: {e}")
                     else:
@@ -1015,7 +1062,6 @@ def webhook():
                     try:
                         # Build market context for ML from real candle data
                         current_hour = datetime.now(timezone.utc).hour
-                        current_minute = datetime.now(timezone.utc).minute
                         _sym_upper = symbol.upper()
                         _is_us30_sym = 'US30' in _sym_upper or 'US_30' in _sym_upper
 
@@ -1125,6 +1171,14 @@ def webhook():
                 # Store signal in history for dashboard
                 new_signal_id = add_signal_to_history(signal, symbol)
                 
+                if not new_signal_id:
+                    # Duplicate signal — already have a pending signal with same params
+                    return jsonify({
+                        'status': 'duplicate_signal',
+                        'message': f'Duplicate signal ignored for {symbol}',
+                        'symbol': symbol
+                    }), 200
+                
                 # ── Register with TradeTracker for automatic TP/SL monitoring ──
                 # Brand-new signals: skip_verification=True (signal is < 1 candle old,
                 # no history to verify yet — verification kicks in on subsequent updates)
@@ -1223,7 +1277,7 @@ def webhook():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/')
+@app.route('/', methods=['GET'])
 def dashboard():
     """Serve the trading dashboard."""
     return send_from_directory(STATIC_DIR, 'dashboard.html')
@@ -1868,7 +1922,6 @@ if __name__ == '__main__':
         # Initialize to today to prevent immediate report on restart
         from datetime import datetime as dt_inner
         now_dt = dt_inner.now(timezone.utc)
-        last_report_date = now_dt.date()
         last_weekly_date = now_dt.date() if now_dt.weekday() == 6 else None
         last_journal_date = now_dt.date() if now_dt.weekday() == 4 and now_dt.hour >= 22 else None
         
@@ -1876,8 +1929,8 @@ if __name__ == '__main__':
         last_session_start_date = now_dt.date() if 10 <= now_dt.hour < 17 else None
         last_session_end_date = now_dt.date() if now_dt.hour >= 17 else None
         
-        # Wait 2 minutes before first check to allow startup
-        time_module.sleep(120)
+        # Wait 30 seconds before first check to allow startup
+        time_module.sleep(30)
         
         while True:
             try:
@@ -1886,11 +1939,11 @@ if __name__ == '__main__':
                 
                 # === SESSION START ALERT (10:00 UTC) ===
                 # Only on weekdays (Mon-Fri) and if not already sent today
-                if now.hour == 10 and now.minute < 30 and now.weekday() < 5:
+                if now.hour == 10 and now.minute < 5 and now.weekday() < 5:
                     if last_session_start_date != today:
                         session_msg = (
                             "🟢 <b>Trading Session Started</b>\n\n"
-                            f"⏰ {now.strftime('%H:%M')} UTC | {now.strftime('%A')}\n"
+                            f"⏰ 10:00 UTC | {now.strftime('%A')}\n"
                             f"📊 Session: 10:00 - 17:00 UTC\n"
                             f"🎯 Pairs: EUR/USD, GBP/USD\n\n"
                             "<i>Actively scanning for ICT setups...</i>"
@@ -1904,7 +1957,7 @@ if __name__ == '__main__':
                 
                 # === SESSION END ALERT (17:00 UTC) ===
                 # Only on weekdays and if not already sent today
-                if now.hour == 17 and now.minute < 30 and now.weekday() < 5:
+                if now.hour == 17 and now.minute < 5 and now.weekday() < 5:
                     if last_session_end_date != today:
                         # Get session stats
                         session_stats_msg = ""
@@ -1922,7 +1975,7 @@ if __name__ == '__main__':
                         
                         end_msg = (
                             "🔴 <b>Trading Session Ended</b>\n\n"
-                            f"⏰ {now.strftime('%H:%M')} UTC | {now.strftime('%A')}"
+                            f"⏰ 17:00 UTC | {now.strftime('%A')}"
                             f"{session_stats_msg}\n"
                             "<i>Monitoring mode until next session...</i>"
                         )
@@ -1981,12 +2034,12 @@ if __name__ == '__main__':
                         except Exception as e:
                             logger.error(f"Weekly journal error: {e}")
                 
-                # Check every 30 minutes
-                time_module.sleep(1800)
+                # Check every 60 seconds for precise timing
+                time_module.sleep(60)
                 
             except Exception as e:
                 logger.error(f"Daily report scheduler error: {e}")
-                time_module.sleep(300)  # Wait 5 min on error
+                time_module.sleep(60)  # Wait 1 min on error
     
     # Start scheduler thread
     if REPORT_TRACKER_AVAILABLE and telegram_notifier:
@@ -2062,7 +2115,7 @@ if __name__ == '__main__':
                             f"<b>Current Prices:</b>\n{prices_text}"
                         )
                     
-                    elif text == '/report':
+                    elif text in ('/report', '/weekly'):
                         # Send weekly performance report on demand
                         if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
                             reporter = get_weekly_reporter()
@@ -2186,19 +2239,6 @@ if __name__ == '__main__':
                         else:
                             response_text = f"❌ {MSG_ML_NOT_AVAILABLE}"
                     
-                    elif text == '/weekly':
-                        # Send weekly report
-                        if WEEKLY_REPORTER_AVAILABLE and get_weekly_reporter:
-                            reporter = get_weekly_reporter()
-                            weekly_text = reporter.format_telegram_report()
-                            if telegram_notifier:
-                                telegram_notifier.send_message(weekly_text)
-                            if telegram_group_notifier:
-                                telegram_group_notifier.send_message(weekly_text)
-                            response_text = "📊 Weekly report sent!"
-                        else:
-                            response_text = "❌ Weekly reporter not available"
-                    
                     elif text == '/abtest':
                         # Send A/B test comparison
                         if AB_TESTING_AVAILABLE and get_ab_framework:
@@ -2233,7 +2273,6 @@ if __name__ == '__main__':
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         command_thread = threading.Thread(target=telegram_command_handler, daemon=True)
         command_thread.start()
-        logger.info("🤖 Telegram command handler started")
     
     # Run server
     app.run(host='0.0.0.0', port=PORT, debug=False)

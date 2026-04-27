@@ -192,7 +192,7 @@ class EnhancedRiskManager:
         self,
         entry_price: float,
         stop_loss: float,
-        symbol: str = "",  # noqa: ARG002 - kept for API compatibility
+        _symbol: str = "",  # kept for API compatibility
         ml_risk_multiplier: float = 1.0  # ML-based risk adjustment
     ) -> float:
         """

@@ -273,11 +273,15 @@ class TelegramNotifier:
         resolved = wins + losses
         
         total_r = sum(t.get('rr_achieved', 0) for t in wins) + sum(t.get('rr_achieved', 0) for t in losses)
-        win_r = sum(t.get('rr_achieved', 0) for t in wins)
         win_rate = len(wins) / len(resolved) * 100 if resolved else 0
         
         # Header
-        r_emoji = "🟢" if total_r > 0 else "🔴" if total_r < 0 else "⚪"
+        if total_r > 0:
+            r_emoji = "🟢"
+        elif total_r < 0:
+            r_emoji = "🔴"
+        else:
+            r_emoji = "⚪"
         message = f"""📋 <b>END OF DAY REPORT</b>
 📅 {date_str} | {day_name}
 
@@ -308,7 +312,6 @@ class TelegramNotifier:
                 pips = t.get('pips_result', 0)
                 rr = t.get('rr_achieved', 0)
                 setup = t.get('setup_type', '?')
-                filled = t.get('entry_filled', True)
                 
                 if status == 'win':
                     icon = "✅"
@@ -407,7 +410,7 @@ class TelegramNotifier:
         
         # Footer
         message += f"\n{'='*30}\n"
-        message += f"\n<i>Jarvis ICT/SMC | Dynamic TP | Entry Fill Verified</i>"
+        message += "\n<i>Jarvis ICT/SMC | Dynamic TP | Entry Fill Verified</i>"
         
         return self.send_message(message)
     

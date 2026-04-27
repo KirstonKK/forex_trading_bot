@@ -1,0 +1,81 @@
+{
+  "week_start": "2026-03-16",
+  "week_end": "2026-03-20",
+  "total_signals": 5,
+  "wins": 0,
+  "losses": 4,
+  "expired": 1,
+  "pending": 0,
+  "win_rate": 0.0,
+  "total_r": -4.0,
+  "win_r": 0,
+  "loss_r": 4.0,
+  "profit_factor": 0.0,
+  "total_pips_forex": -140.29991359710604,
+  "total_pips_gold": -250.0,
+  "by_pair": {
+    "GBP_USD": {
+      "wins": 0,
+      "losses": 2,
+      "expired": 0,
+      "r": -2.0,
+      "pips": -20.299913597106034
+    },
+    "XAU_USD": {
+      "wins": 0,
+      "losses": 1,
+      "expired": 0,
+      "r": -1.0,
+      "pips": -250.0
+    },
+    "EUR_USD": {
+      "wins": 0,
+      "losses": 0,
+      "expired": 1,
+      "r": -1.0,
+      "pips": -7.399999999999629
+    },
+    "US30": {
+      "wins": 0,
+      "losses": 1,
+      "expired": 0,
+      "r": -1.0,
+      "pips": -120.0
+    }
+  },
+  "by_setup": {
+    "LIQ_SWEEP_ENGULF": {
+      "wins": 0,
+      "losses": 4,
+      "r": -4.0
+    }
+  },
+  "by_day": {
+    "Mon 03/16": {
+      "wins": 0,
+      "losses": 2,
+      "expired": 0,
+      "r": -2.0
+    },
+    "Wed 03/18": {
+      "wins": 0,
+      "losses": 1,
+      "expired": 1,
+      "r": -2.0
+    },
+    "Thu 03/19": {
+      "wins": 0,
+      "losses": 1,
+      "expired": 0,
+      "r": -1.0
+    }
+  },
+  "equity_curve": [
+    -1.0,
+    -2.0,
+    -3.0,
+    -4.0
+  ],
+  "best_win_streak": 0,
+  "worst_loss_streak": 4
+}
